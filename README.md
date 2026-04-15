@@ -15,7 +15,7 @@ value = CSV 파일에서 해당 row가 시작되는 위치
 
 ---
 
-## 1. 요구사항 대응 요약
+## 1. 요구사항 대응 요약과 B+ Tree 핵심
 
 | 요구사항 | 구현 내용 |
 | --- | --- |
@@ -24,6 +24,21 @@ value = CSV 파일에서 해당 row가 시작되는 위치
 | ID 기준 SELECT | `WHERE id = ?`는 `[INDEX]` 경로로 처리합니다. |
 | 다른 필드 SELECT | `WHERE name`, `WHERE age`, `id != ?`는 `[SCAN]` 경로로 처리합니다. |
 | 대용량 테스트 | `make seed-demo-data RECORDS=1000000`로 100만 건 CSV를 생성합니다. |
+
+B+ Tree는 `bptree.c`에 독립 모듈로 구현했습니다.  
+key는 `id`, value는 CSV row offset이며, 중복 key는 허용하지 않습니다.
+
+<img width="5200" height="2732" alt="image" src="https://github.com/user-attachments/assets/6cfce597-0ea3-4630-8ac1-804aabbfa5eb" />
+
+```text
+bptree_insert()  : key를 정렬된 leaf node에 삽입
+bptree_search()  : id로 offset 1개 검색
+leaf split       : leaf가 가득 차면 오른쪽 leaf를 만들고 key를 나눔
+internal split   : 부모 node도 가득 차면 split 후 promoted key를 위로 올림
+leaf next        : id > ?, id < ? 범위 조회에서 순차 이동에 사용
+```
+
+이 구현 덕분에 `WHERE id = ?`는 tree 높이만큼만 이동해 offset을 찾고, `WHERE id > ?`, `WHERE id < ?`는 leaf 연결을 따라 필요한 offset들을 모을 수 있습니다.
 
 ---
 
@@ -153,27 +168,7 @@ payload : 약 12 bytes / row
 
 ---
 
-## 7. B+ Tree 핵심 구현
-
-
-<img width="5200" height="2732" alt="image" src="https://github.com/user-attachments/assets/6cfce597-0ea3-4630-8ac1-804aabbfa5eb" />
-
-B+ Tree는 `bptree.c`에 독립 모듈로 구현했습니다.  
-key는 `id`, value는 CSV row offset이며, 중복 key는 허용하지 않습니다.
-
-```text
-bptree_insert()  : key를 정렬된 leaf node에 삽입
-bptree_search()  : id로 offset 1개 검색
-leaf split       : leaf가 가득 차면 오른쪽 leaf를 만들고 key를 나눔
-internal split   : 부모 node도 가득 차면 split 후 promoted key를 위로 올림
-leaf next        : id > ?, id < ? 범위 조회에서 순차 이동에 사용
-```
-
-이 구현 덕분에 `WHERE id = ?`는 tree 높이만큼만 이동해 offset을 찾고, `WHERE id > ?`, `WHERE id < ?`는 leaf 연결을 따라 필요한 offset들을 모을 수 있습니다.
-
----
-
-## 8. 메모리 인덱스 재구성
+## 7. 메모리 인덱스 재구성
 
 이번 인덱스는 디스크에 저장하지 않는 메모리 기반 구조입니다.  
 따라서 프로그램을 새로 실행하면 B+ Tree는 비어 있고, 기존 CSV 데이터와 다시 연결하는 과정이 필요합니다.
