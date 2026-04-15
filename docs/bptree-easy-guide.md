@@ -105,6 +105,35 @@ flowchart LR
 leaf를 왼쪽에서 오른쪽으로 연결해 두면 `id > 900000` 같은 조건에서
 다음 leaf로 계속 넘어가며 결과를 모을 수 있습니다.
 
+### 예시 트리 모양
+
+아래 그림은 이 프로젝트의 B+ Tree를 아주 단순하게 그린 예시입니다.
+핵심은 internal node는 "어느 자식으로 내려갈지"만 안내하고, 실제
+`id -> offset` 쌍은 leaf node에만 들어 있다는 점입니다. 이 그림은
+설명용 스냅샷이며, `offset` 숫자도 이해를 돕기 위한 예시입니다.
+
+```mermaid
+flowchart TD
+    R["internal root<br/>keys: [4 | 7]"]
+    L1["leaf<br/>keys: [1 | 2 | 3]<br/>offsets: [16 | 32 | 48]"]
+    L2["leaf<br/>keys: [4 | 5 | 6]<br/>offsets: [64 | 80 | 96]"]
+    L3["leaf<br/>keys: [7 | 8 | 9]<br/>offsets: [112 | 128 | 144]"]
+
+    R -- "id < 4" --> L1
+    R -- "4 <= id < 7" --> L2
+    R -- "id >= 7" --> L3
+
+    L1 -. "next" .-> L2
+    L2 -. "next" .-> L3
+```
+
+이 그림을 읽는 방법은 아래처럼 생각하면 쉽습니다.
+
+- root의 `4`는 "오른쪽으로 한 칸 가면 4부터 시작"이라는 경계값
+- root의 `7`은 "그다음 자식은 7부터 시작"이라는 경계값
+- 실제 CSV 위치 정보는 leaf의 `offsets[]`에만 저장
+- range scan은 `next`를 따라 leaf를 왼쪽에서 오른쪽으로 순회
+
 ## 코드 구조
 
 핵심 구조체는 [src/bptree.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/bptree.c:8) 에 있습니다.
