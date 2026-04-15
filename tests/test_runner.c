@@ -7,6 +7,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include "bptree.h"
 #include "sqlproc.h"
 
 /*
@@ -205,6 +206,35 @@ static int test_parse_insert_without_column_list(void)
     }
 
     return strcmp(program.items[0].insert_statement.values[1].text, "park") == 0;
+}
+
+static int test_parse_select_where_equals(void)
+{
+    SqlProgram program;
+    ErrorInfo error;
+
+    if (!parse_sql_text("SELECT name FROM users WHERE id = 7;", &program, &error)) {
+        return 0;
+    }
+
+    if (program.count != 1 ||
+        program.items[0].type != STATEMENT_SELECT) {
+        return 0;
+    }
+
+    if (!program.items[0].select_statement.has_where) {
+        return 0;
+    }
+
+    if (strcmp(program.items[0].select_statement.where_column, "id") != 0) {
+        return 0;
+    }
+
+    if (program.items[0].select_statement.where_value.type != LITERAL_INT) {
+        return 0;
+    }
+
+    return strcmp(program.items[0].select_statement.where_value.text, "7") == 0;
 }
 
 static int test_run_program_success(void)
@@ -408,6 +438,109 @@ static int parse_sql_text(const char *sql_text, SqlProgram *program, ErrorInfo *
     }
 
     return parse_program(&tokens, program, error);
+}
+
+static int test_bptree_single_key_search(void)
+{
+    BPlusTree *tree;
+    long offset;
+    int ok;
+
+    tree = bptree_create();
+    if (tree == NULL) {
+        return 0;
+    }
+
+    ok = bptree_insert(tree, 10, 1234L) &&
+         bptree_search(tree, 10, &offset) &&
+         offset == 1234L &&
+         !bptree_search(tree, 99, &offset);
+
+    bptree_destroy(tree);
+    return ok;
+}
+
+static int test_bptree_multiple_keys_and_split(void)
+{
+    BPlusTree *tree;
+    int keys[] = {5, 2, 8, 1, 3, 7, 6, 4, 9, 10};
+    int i;
+    int ok;
+
+    tree = bptree_create();
+    if (tree == NULL) {
+        return 0;
+    }
+
+    ok = 1;
+    for (i = 0; i < (int)(sizeof(keys) / sizeof(keys[0])); i++) {
+        if (!bptree_insert(tree, keys[i], keys[i] * 100L)) {
+            ok = 0;
+            break;
+        }
+    }
+
+    for (i = 1; ok && i <= 10; i++) {
+        long offset;
+
+        if (!bptree_search(tree, i, &offset) || offset != i * 100L) {
+            ok = 0;
+        }
+    }
+
+    bptree_destroy(tree);
+    return ok;
+}
+
+static int test_bptree_duplicate_key_fail(void)
+{
+    BPlusTree *tree;
+    long offset;
+    int ok;
+
+    tree = bptree_create();
+    if (tree == NULL) {
+        return 0;
+    }
+
+    ok = bptree_insert(tree, 1, 10L) &&
+         !bptree_insert(tree, 1, 20L) &&
+         bptree_search(tree, 1, &offset) &&
+         offset == 10L;
+
+    bptree_destroy(tree);
+    return ok;
+}
+
+static int test_bptree_thousand_keys(void)
+{
+    BPlusTree *tree;
+    int i;
+    int ok;
+
+    tree = bptree_create();
+    if (tree == NULL) {
+        return 0;
+    }
+
+    ok = 1;
+    for (i = 1000; i >= 1; i--) {
+        if (!bptree_insert(tree, i, i + 5000L)) {
+            ok = 0;
+            break;
+        }
+    }
+
+    for (i = 1; ok && i <= 1000; i++) {
+        long offset;
+
+        if (!bptree_search(tree, i, &offset) || offset != i + 5000L) {
+            ok = 0;
+        }
+    }
+
+    bptree_destroy(tree);
+    return ok;
 }
 
 static int test_parse_empty_sql_fail(void)
@@ -777,6 +910,52 @@ static int test_insert_auto_primary_key_uses_existing_max(void)
     return file_contains_text(data_path, "id,name,age\n5,park,40\n6,kim,20\n");
 }
 
+static int test_insert_explicit_primary_key_advances_auto_value(void)
+{
+    AppConfig config;
+    SqlProgram program;
+    ErrorInfo error;
+    char base_dir[256];
+    char schema_dir[256];
+    char data_dir[256];
+    char schema_path[512];
+    char data_path[512];
+
+    if (!create_temp_workspace(base_dir,
+                               sizeof(base_dir),
+                               schema_dir,
+                               sizeof(schema_dir),
+                               data_dir,
+                               sizeof(data_dir),
+                               "sqlproc_explicit_then_auto_pk_")) {
+        return 0;
+    }
+
+    snprintf(schema_path, sizeof(schema_path), "%s/users.schema", schema_dir);
+    snprintf(data_path, sizeof(data_path), "%s/users.csv", data_dir);
+
+    if (!write_text_file(schema_path, "id:int,name:string,age:int\n")) {
+        return 0;
+    }
+
+    if (!parse_sql_text("INSERT INTO users (id, name, age) VALUES (10, 'park', 40);"
+                        "INSERT INTO users (name, age) VALUES ('kim', 20);",
+                        &program,
+                        &error)) {
+        return 0;
+    }
+
+    memset(&config, 0, sizeof(config));
+    snprintf(config.schema_dir, sizeof(config.schema_dir), "%s", schema_dir);
+    snprintf(config.data_dir, sizeof(config.data_dir), "%s", data_dir);
+
+    if (!execute_program(&config, &program, &error)) {
+        return 0;
+    }
+
+    return file_contains_text(data_path, "id,name,age\n10,park,40\n11,kim,20\n");
+}
+
 static int test_insert_duplicate_primary_key_fail(void)
 {
     AppConfig config;
@@ -880,6 +1059,97 @@ static int test_insert_duplicate_primary_key_existing_csv_fail(void)
 
     return file_contains_text(data_path, "id,name,age\n7,park,40\n") &&
            !file_contains_text(data_path, "kim,20");
+}
+
+static int test_select_where_index_and_scan_success(void)
+{
+    AppConfig config;
+    char base_dir[256];
+    char schema_dir[256];
+    char data_dir[256];
+    char schema_path[512];
+    char sql_path[256];
+    char output_path[512];
+
+    if (!create_temp_workspace(base_dir,
+                               sizeof(base_dir),
+                               schema_dir,
+                               sizeof(schema_dir),
+                               data_dir,
+                               sizeof(data_dir),
+                               "sqlproc_where_index_scan_")) {
+        return 0;
+    }
+
+    snprintf(schema_path, sizeof(schema_path), "%s/users.schema", schema_dir);
+    snprintf(sql_path, sizeof(sql_path), "%s/input.sql", base_dir);
+    snprintf(output_path, sizeof(output_path), "%s/output.txt", base_dir);
+
+    if (!write_text_file(schema_path, "id:int,name:string,age:int\n")) {
+        return 0;
+    }
+
+    if (!write_text_file(sql_path,
+                         "INSERT INTO users (name, age) VALUES ('kim', 20);"
+                         "INSERT INTO users (name, age) VALUES ('lee', 30);"
+                         "SELECT * FROM users WHERE id = 2;"
+                         "SELECT name FROM users WHERE name = 'kim';")) {
+        return 0;
+    }
+
+    memset(&config, 0, sizeof(config));
+    snprintf(config.schema_dir, sizeof(config.schema_dir), "%s", schema_dir);
+    snprintf(config.data_dir, sizeof(config.data_dir), "%s", data_dir);
+    snprintf(config.input_path, sizeof(config.input_path), "%s", sql_path);
+
+    if (!capture_run_program(&config, output_path)) {
+        return 0;
+    }
+
+    return file_contains_text(output_path, "[INDEX] WHERE id = 2\n") &&
+           file_contains_text(output_path, "id\tname\tage\n2\tlee\t30\n") &&
+           file_contains_text(output_path, "[SCAN] WHERE name = kim\n") &&
+           file_contains_text(output_path, "name\nkim\n");
+}
+
+static int test_select_where_id_type_error(void)
+{
+    AppConfig config;
+    SqlProgram program;
+    ErrorInfo error;
+    char base_dir[256];
+    char schema_dir[256];
+    char data_dir[256];
+    char schema_path[512];
+
+    if (!create_temp_workspace(base_dir,
+                               sizeof(base_dir),
+                               schema_dir,
+                               sizeof(schema_dir),
+                               data_dir,
+                               sizeof(data_dir),
+                               "sqlproc_where_type_error_")) {
+        return 0;
+    }
+
+    snprintf(schema_path, sizeof(schema_path), "%s/users.schema", schema_dir);
+    if (!write_text_file(schema_path, "id:int,name:string,age:int\n")) {
+        return 0;
+    }
+
+    if (!parse_sql_text("SELECT * FROM users WHERE id = 'kim';", &program, &error)) {
+        return 0;
+    }
+
+    memset(&config, 0, sizeof(config));
+    snprintf(config.schema_dir, sizeof(config.schema_dir), "%s", schema_dir);
+    snprintf(config.data_dir, sizeof(config.data_dir), "%s", data_dir);
+
+    if (execute_program(&config, &program, &error)) {
+        return 0;
+    }
+
+    return strstr(error.message, "WHERE 값 타입이 스키마와 맞지 않습니다.") != NULL;
 }
 
 static int test_insert_formula_like_string_fail(void)
@@ -1057,6 +1327,31 @@ int main(void)
         return 1;
     }
 
+    if (!test_parse_select_where_equals()) {
+        fprintf(stderr, "test_parse_select_where_equals failed\n");
+        return 1;
+    }
+
+    if (!test_bptree_single_key_search()) {
+        fprintf(stderr, "test_bptree_single_key_search failed\n");
+        return 1;
+    }
+
+    if (!test_bptree_multiple_keys_and_split()) {
+        fprintf(stderr, "test_bptree_multiple_keys_and_split failed\n");
+        return 1;
+    }
+
+    if (!test_bptree_duplicate_key_fail()) {
+        fprintf(stderr, "test_bptree_duplicate_key_fail failed\n");
+        return 1;
+    }
+
+    if (!test_bptree_thousand_keys()) {
+        fprintf(stderr, "test_bptree_thousand_keys failed\n");
+        return 1;
+    }
+
     if (!test_run_program_success()) {
         fprintf(stderr, "test_run_program_success failed\n");
         return 1;
@@ -1102,6 +1397,11 @@ int main(void)
         return 1;
     }
 
+    if (!test_insert_explicit_primary_key_advances_auto_value()) {
+        fprintf(stderr, "test_insert_explicit_primary_key_advances_auto_value failed\n");
+        return 1;
+    }
+
     if (!test_insert_duplicate_primary_key_fail()) {
         fprintf(stderr, "test_insert_duplicate_primary_key_fail failed\n");
         return 1;
@@ -1109,6 +1409,16 @@ int main(void)
 
     if (!test_insert_duplicate_primary_key_existing_csv_fail()) {
         fprintf(stderr, "test_insert_duplicate_primary_key_existing_csv_fail failed\n");
+        return 1;
+    }
+
+    if (!test_select_where_index_and_scan_success()) {
+        fprintf(stderr, "test_select_where_index_and_scan_success failed\n");
+        return 1;
+    }
+
+    if (!test_select_where_id_type_error()) {
+        fprintf(stderr, "test_select_where_id_type_error failed\n");
         return 1;
     }
 

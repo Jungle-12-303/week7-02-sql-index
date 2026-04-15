@@ -127,6 +127,63 @@ INSERT INTO users VALUES (1, 'kim', 20);
 INSERT INTO users (name, id, age) VALUES ('lee', 2, 30);
 SELECT * FROM users;
 SELECT name, age FROM users;
+SELECT * FROM users WHERE id = 1;
+SELECT name FROM users WHERE name = 'kim';
+```
+
+## 7주차: B+ Tree 인덱스
+
+이번 버전은 `id:int` 컬럼을 PK로 보고, 메모리 기반 B+ Tree 인덱스를 연결합니다.
+
+```mermaid
+flowchart LR
+    A["INSERT"] --> B["자동 PK 부여"]
+    B --> C["CSV row append"]
+    C --> D["ftell() row offset"]
+    D --> E["B+ Tree<br/>id -> offset"]
+```
+
+- `INSERT INTO users (name, age) VALUES ('kim', 20);`처럼 `id`를 생략하면 자동으로 다음 PK가 부여됩니다.
+- CSV에 row를 쓰기 직전 `ftell()`로 row 시작 위치를 얻고, B+ Tree에는 `id -> CSV offset`만 저장합니다.
+- 프로그램 실행 중 테이블을 처음 사용할 때 기존 CSV를 스캔해 메모리 B+ Tree를 재구성합니다.
+- `SELECT * FROM users WHERE id = 2;`는 `[INDEX]` 로그를 출력하고 B+ Tree로 row offset을 찾습니다.
+- `SELECT * FROM users WHERE name = 'kim';`처럼 PK가 아닌 컬럼 조건은 `[SCAN]` 로그를 출력하고 CSV를 선형 탐색합니다.
+
+### 인덱스 데모
+
+```bash
+make
+make test
+rm -rf demo-data
+mkdir demo-data
+./build/sqlproc --schema-dir ./examples/schemas --data-dir ./demo-data ./examples/index_demo.sql
+```
+
+### 성능 비교
+
+```bash
+make bench
+./build/bench_index
+```
+
+기본값은 1,000,000개 레코드입니다. 더 작은 값으로 빠르게 확인하려면 아래처럼 실행할 수 있습니다.
+
+```bash
+./build/bench_index 10000
+```
+
+`sqlproc`에서 바로 조회할 수 있는 100만 건 CSV를 만들려면 아래 명령을 사용합니다.
+
+```bash
+make seed-demo-data
+./build/sqlproc --schema-dir ./examples/schemas --data-dir ./demo-data --interactive
+```
+
+이후 대화형 모드에서 아래처럼 확인할 수 있습니다.
+
+```sql
+SELECT * FROM users WHERE id = 900000;
+SELECT name, age FROM users WHERE name = 'user900000';
 ```
 
 ## 시연 예시

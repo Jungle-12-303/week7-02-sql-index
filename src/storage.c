@@ -347,10 +347,12 @@ static void print_selected_header(const TableSchema *schema,
 int storage_append_row(const AppConfig *config,
                        const TableSchema *schema,
                        char row_values[SQLPROC_MAX_COLUMNS][SQLPROC_MAX_VALUE_LEN],
+                       long *out_offset,
                        ErrorInfo *error)
 {
     char path[STORAGE_MAX_PATH_LEN];
     FILE *file;
+    long row_offset;
 
     /* INSERT용 한 행을 파일에 추가하기 전에 헤더 상태를 먼저 맞춥니다. */
     if (!ensure_data_file(config, schema, error)) {
@@ -370,10 +372,21 @@ int storage_append_row(const AppConfig *config,
         return 0;
     }
 
+    row_offset = ftell(file);
+    if (row_offset < 0) {
+        fclose(file);
+        set_file_error(error, "데이터 행 위치를 확인할 수 없습니다.");
+        return 0;
+    }
+
     if (!write_csv_row(file, row_values, schema->column_count)) {
         fclose(file);
         set_file_error(error, "데이터 행을 파일에 쓸 수 없습니다.");
         return 0;
+    }
+
+    if (out_offset != NULL) {
+        *out_offset = row_offset;
     }
 
     fclose(file);
@@ -475,6 +488,257 @@ int storage_print_rows(const AppConfig *config,
             fputs(values[selected_indices[i]], stdout);
         }
 
+        fputc('\n', stdout);
+    }
+
+    fclose(file);
+    return 1;
+}
+
+int storage_print_row_at_offset(const AppConfig *config,
+                                const TableSchema *schema,
+                                long offset,
+                                const int selected_indices[SQLPROC_MAX_COLUMNS],
+                                int selected_count,
+                                ErrorInfo *error)
+{
+    char path[STORAGE_MAX_PATH_LEN];
+    char line[STORAGE_MAX_ROW_LEN];
+    char values[SQLPROC_MAX_COLUMNS][SQLPROC_MAX_VALUE_LEN];
+    FILE *file;
+    int value_count;
+    int i;
+
+    /*
+     * B+ Tree 검색 결과로 받은 CSV row offset으로 바로 이동해
+     * 필요한 한 줄만 읽습니다. offset이 음수이면 결과가 없는 조회로 보고
+     * 헤더만 출력합니다.
+     */
+    print_selected_header(schema, selected_indices, selected_count);
+    if (offset < 0) {
+        return 1;
+    }
+
+    build_table_path(path, sizeof(path), config->data_dir, schema->table_name, ".csv");
+    file = fopen(path, "rb");
+    if (file == NULL) {
+        set_file_error(error, "데이터 파일을 열 수 없습니다.");
+        return 0;
+    }
+
+    if (fgets(line, sizeof(line), file) == NULL) {
+        fclose(file);
+        set_file_error(error, "CSV 헤더를 읽을 수 없습니다.");
+        return 0;
+    }
+
+    if (!validate_line_length(line, sizeof(line), file, error, "CSV 헤더 행이 너무 깁니다.")) {
+        fclose(file);
+        return 0;
+    }
+
+    {
+        char header_values[SQLPROC_MAX_COLUMNS][SQLPROC_MAX_VALUE_LEN];
+        int header_count;
+
+        if (!parse_csv_line(line, header_values, &header_count)) {
+            fclose(file);
+            set_file_error(error, "CSV 헤더 형식이 잘못되었습니다.");
+            return 0;
+        }
+
+        if (!validate_header_values(schema,
+                                    header_values,
+                                    header_count,
+                                    error,
+                                    "CSV 헤더가 스키마와 다릅니다.",
+                                    "CSV 헤더 순서가 스키마와 다릅니다.")) {
+            fclose(file);
+            return 0;
+        }
+    }
+
+    if (fseek(file, offset, SEEK_SET) != 0) {
+        fclose(file);
+        set_file_error(error, "CSV 행 위치로 이동할 수 없습니다.");
+        return 0;
+    }
+
+    if (fgets(line, sizeof(line), file) == NULL) {
+        fclose(file);
+        set_file_error(error, "CSV 행을 읽을 수 없습니다.");
+        return 0;
+    }
+
+    if (!validate_line_length(line, sizeof(line), file, error, "CSV 행이 너무 깁니다.")) {
+        fclose(file);
+        return 0;
+    }
+
+    memset(values, 0, sizeof(values));
+    if (!parse_csv_line(line, values, &value_count)) {
+        fclose(file);
+        set_file_error(error, "CSV 행을 읽는 중 오류가 발생했습니다.");
+        return 0;
+    }
+
+    if (value_count != schema->column_count) {
+        fclose(file);
+        set_file_error(error, "CSV 컬럼 수가 스키마와 맞지 않습니다.");
+        return 0;
+    }
+
+    for (i = 0; i < selected_count; i++) {
+        if (i > 0) {
+            fputc('\t', stdout);
+        }
+
+        fputs(values[selected_indices[i]], stdout);
+    }
+    fputc('\n', stdout);
+
+    fclose(file);
+    return 1;
+}
+
+static int csv_value_matches_where(const TableSchema *schema,
+                                   const char values[SQLPROC_MAX_COLUMNS][SQLPROC_MAX_VALUE_LEN],
+                                   int where_column_index,
+                                   const LiteralValue *where_value,
+                                   int *matches)
+{
+    char *end_ptr;
+    long row_value;
+    long target_value;
+
+    *matches = 0;
+
+    if (schema->columns[where_column_index].type == DATA_TYPE_STRING) {
+        *matches = strcmp(values[where_column_index], where_value->text) == 0;
+        return 1;
+    }
+
+    errno = 0;
+    row_value = strtol(values[where_column_index], &end_ptr, 10);
+    if (errno == ERANGE || *end_ptr != '\0' ||
+        row_value < INT_MIN || row_value > INT_MAX) {
+        return 0;
+    }
+
+    errno = 0;
+    target_value = strtol(where_value->text, &end_ptr, 10);
+    if (errno == ERANGE || *end_ptr != '\0' ||
+        target_value < INT_MIN || target_value > INT_MAX) {
+        return 0;
+    }
+
+    *matches = row_value == target_value;
+    return 1;
+}
+
+int storage_print_rows_where_equals(const AppConfig *config,
+                                    const TableSchema *schema,
+                                    const int selected_indices[SQLPROC_MAX_COLUMNS],
+                                    int selected_count,
+                                    int where_column_index,
+                                    const LiteralValue *where_value,
+                                    ErrorInfo *error)
+{
+    char path[STORAGE_MAX_PATH_LEN];
+    char line[STORAGE_MAX_ROW_LEN];
+    FILE *file;
+
+    /*
+     * PK가 아닌 WHERE 조건은 별도 인덱스가 없으므로 CSV를 처음부터 끝까지
+     * 선형 탐색합니다.
+     */
+    build_table_path(path, sizeof(path), config->data_dir, schema->table_name, ".csv");
+    file = fopen(path, "rb");
+    if (file == NULL) {
+        if (errno == ENOENT) {
+            print_selected_header(schema, selected_indices, selected_count);
+            return 1;
+        }
+
+        set_file_error(error, "데이터 파일을 열 수 없습니다.");
+        return 0;
+    }
+
+    if (fgets(line, sizeof(line), file) == NULL) {
+        fclose(file);
+        print_selected_header(schema, selected_indices, selected_count);
+        return 1;
+    }
+
+    if (!validate_line_length(line, sizeof(line), file, error, "CSV 헤더 행이 너무 깁니다.")) {
+        fclose(file);
+        return 0;
+    }
+
+    {
+        char header_values[SQLPROC_MAX_COLUMNS][SQLPROC_MAX_VALUE_LEN];
+        int header_count;
+
+        if (!parse_csv_line(line, header_values, &header_count)) {
+            fclose(file);
+            set_file_error(error, "CSV 헤더 형식이 잘못되었습니다.");
+            return 0;
+        }
+
+        if (!validate_header_values(schema,
+                                    header_values,
+                                    header_count,
+                                    error,
+                                    "CSV 헤더가 스키마와 다릅니다.",
+                                    "CSV 헤더 순서가 스키마와 다릅니다.")) {
+            fclose(file);
+            return 0;
+        }
+    }
+
+    print_selected_header(schema, selected_indices, selected_count);
+
+    while (fgets(line, sizeof(line), file) != NULL) {
+        char values[SQLPROC_MAX_COLUMNS][SQLPROC_MAX_VALUE_LEN];
+        int value_count;
+        int matches;
+        int i;
+
+        if (!validate_line_length(line, sizeof(line), file, error, "CSV 행이 너무 깁니다.")) {
+            fclose(file);
+            return 0;
+        }
+
+        memset(values, 0, sizeof(values));
+        if (!parse_csv_line(line, values, &value_count)) {
+            fclose(file);
+            set_file_error(error, "CSV 행을 읽는 중 오류가 발생했습니다.");
+            return 0;
+        }
+
+        if (value_count != schema->column_count) {
+            fclose(file);
+            set_file_error(error, "CSV 컬럼 수가 스키마와 맞지 않습니다.");
+            return 0;
+        }
+
+        if (!csv_value_matches_where(schema, values, where_column_index, where_value, &matches)) {
+            fclose(file);
+            set_file_error(error, "CSV 조건 값을 비교할 수 없습니다.");
+            return 0;
+        }
+
+        if (!matches) {
+            continue;
+        }
+
+        for (i = 0; i < selected_count; i++) {
+            if (i > 0) {
+                fputc('\t', stdout);
+            }
+
+            fputs(values[selected_indices[i]], stdout);
+        }
         fputc('\n', stdout);
     }
 
@@ -689,6 +953,143 @@ int storage_int_value_exists(const AppConfig *config,
             *exists = 1;
             fclose(file);
             return 1;
+        }
+    }
+
+    fclose(file);
+    return 1;
+}
+
+int storage_rebuild_pk_index(const AppConfig *config,
+                             const TableSchema *schema,
+                             BPlusTree *index,
+                             int *max_value,
+                             ErrorInfo *error)
+{
+    char path[STORAGE_MAX_PATH_LEN];
+    char line[STORAGE_MAX_ROW_LEN];
+    FILE *file;
+    int found_value;
+
+    /*
+     * 메모리 인덱스는 프로그램을 끄면 사라집니다. 테이블을 처음 사용할 때
+     * CSV를 다시 훑으며 id -> row offset 쌍을 B+ Tree에 재등록합니다.
+     */
+    *max_value = 0;
+    found_value = 0;
+
+    if (schema->primary_key_index < 0) {
+        return 1;
+    }
+
+    build_table_path(path, sizeof(path), config->data_dir, schema->table_name, ".csv");
+    file = fopen(path, "rb");
+    if (file == NULL) {
+        if (errno == ENOENT) {
+            return 1;
+        }
+
+        set_file_error(error, "데이터 파일을 열 수 없습니다.");
+        return 0;
+    }
+
+    if (fgets(line, sizeof(line), file) == NULL) {
+        fclose(file);
+        return 1;
+    }
+
+    if (!validate_line_length(line,
+                              sizeof(line),
+                              file,
+                              error,
+                              "CSV 헤더 행이 너무 깁니다.")) {
+        fclose(file);
+        return 0;
+    }
+
+    {
+        char header_values[SQLPROC_MAX_COLUMNS][SQLPROC_MAX_VALUE_LEN];
+        int header_count;
+
+        if (!parse_csv_line(line, header_values, &header_count)) {
+            fclose(file);
+            set_file_error(error, "CSV 헤더 형식이 잘못되었습니다.");
+            return 0;
+        }
+
+        if (!validate_header_values(schema,
+                                    header_values,
+                                    header_count,
+                                    error,
+                                    "CSV 헤더가 스키마와 다릅니다.",
+                                    "CSV 헤더 순서가 스키마와 다릅니다.")) {
+            fclose(file);
+            return 0;
+        }
+    }
+
+    while (1) {
+        char values[SQLPROC_MAX_COLUMNS][SQLPROC_MAX_VALUE_LEN];
+        char *end_ptr;
+        long parsed_value;
+        long row_offset;
+        long existing_offset;
+        int value_count;
+
+        row_offset = ftell(file);
+        if (row_offset < 0) {
+            fclose(file);
+            set_file_error(error, "CSV 행 위치를 확인할 수 없습니다.");
+            return 0;
+        }
+
+        if (fgets(line, sizeof(line), file) == NULL) {
+            break;
+        }
+
+        if (!validate_line_length(line, sizeof(line), file, error, "CSV 행이 너무 깁니다.")) {
+            fclose(file);
+            return 0;
+        }
+
+        memset(values, 0, sizeof(values));
+        if (!parse_csv_line(line, values, &value_count)) {
+            fclose(file);
+            set_file_error(error, "CSV 행을 읽는 중 오류가 발생했습니다.");
+            return 0;
+        }
+
+        if (value_count != schema->column_count) {
+            fclose(file);
+            set_file_error(error, "CSV 컬럼 수가 스키마와 맞지 않습니다.");
+            return 0;
+        }
+
+        errno = 0;
+        parsed_value = strtol(values[schema->primary_key_index], &end_ptr, 10);
+        if (errno == ERANGE || *end_ptr != '\0' ||
+            parsed_value < INT_MIN || parsed_value > INT_MAX) {
+            fclose(file);
+            set_file_error(error, "CSV 정수 값을 읽을 수 없습니다.");
+            return 0;
+        }
+
+        if (bptree_search(index, (int)parsed_value, &existing_offset)) {
+            (void)existing_offset;
+            fclose(file);
+            set_file_error(error, "CSV에 중복 PK 값이 있어 인덱스를 만들 수 없습니다.");
+            return 0;
+        }
+
+        if (!bptree_insert(index, (int)parsed_value, row_offset)) {
+            fclose(file);
+            set_file_error(error, "PK 인덱스를 만들 수 없습니다.");
+            return 0;
+        }
+
+        if (!found_value || parsed_value > *max_value) {
+            *max_value = (int)parsed_value;
+            found_value = 1;
         }
     }
 

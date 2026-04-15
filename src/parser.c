@@ -315,7 +315,31 @@ static int parse_select_statement(ParserState *state, Statement *statement, Erro
         return 0;
     }
 
-    return parse_identifier(state, select_statement->table_name, NULL, error);
+    if (!parse_identifier(state, select_statement->table_name, NULL, error)) {
+        return 0;
+    }
+
+    if (token_matches(state, TOKEN_KEYWORD_WHERE)) {
+        select_statement->has_where = 1;
+        advance_token(state);
+
+        if (!parse_identifier(state,
+                              select_statement->where_column,
+                              &select_statement->where_column_location,
+                              error)) {
+            return 0;
+        }
+
+        if (!consume_token(state, TOKEN_EQUAL, error, "= 연산자가 필요합니다.")) {
+            return 0;
+        }
+
+        if (!parse_literal(state, &select_statement->where_value, error)) {
+            return 0;
+        }
+    }
+
+    return 1;
 }
 
 static int parse_statement(ParserState *state, Statement *statement, ErrorInfo *error)

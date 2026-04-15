@@ -12,7 +12,7 @@
  * - SELECT: 선택 컬럼을 계산한 뒤 스토리지에 조회 출력을 요청합니다.
  */
 
-#define EXECUTOR_MAX_PK_STATES 32
+#define EXECUTOR_MAX_TABLE_STATES 32
 
 typedef struct {
     int in_use;
@@ -20,9 +20,10 @@ typedef struct {
     char data_dir[256];
     char table_name[SQLPROC_MAX_NAME_LEN];
     int next_id;
-} PrimaryKeyState;
+    BPlusTree *pk_index;
+} TableRuntimeState;
 
-static PrimaryKeyState primary_key_states[EXECUTOR_MAX_PK_STATES];
+static TableRuntimeState table_states[EXECUTOR_MAX_TABLE_STATES];
 
 static void set_runtime_error(ErrorInfo *error,
                               const char *message,
@@ -99,15 +100,15 @@ static int string_literal_is_safe_for_csv(const LiteralValue *value)
            first_character != '@';
 }
 
-static int find_primary_key_state(const AppConfig *config, const TableSchema *schema)
+static int find_table_state(const AppConfig *config, const TableSchema *schema)
 {
     int i;
 
-    for (i = 0; i < EXECUTOR_MAX_PK_STATES; i++) {
-        if (primary_key_states[i].in_use &&
-            strcmp(primary_key_states[i].schema_dir, config->schema_dir) == 0 &&
-            strcmp(primary_key_states[i].data_dir, config->data_dir) == 0 &&
-            strcmp(primary_key_states[i].table_name, schema->table_name) == 0) {
+    for (i = 0; i < EXECUTOR_MAX_TABLE_STATES; i++) {
+        if (table_states[i].in_use &&
+            strcmp(table_states[i].schema_dir, config->schema_dir) == 0 &&
+            strcmp(table_states[i].data_dir, config->data_dir) == 0 &&
+            strcmp(table_states[i].table_name, schema->table_name) == 0) {
             return i;
         }
     }
@@ -115,62 +116,74 @@ static int find_primary_key_state(const AppConfig *config, const TableSchema *sc
     return -1;
 }
 
-static int create_primary_key_state(const AppConfig *config,
-                                    const TableSchema *schema,
-                                    ErrorInfo *error)
+static int create_table_state(const AppConfig *config,
+                              const TableSchema *schema,
+                              ErrorInfo *error)
 {
     int max_id;
     int i;
+    BPlusTree *index;
 
-    if (!storage_find_max_int_value(config,
-                                    schema,
-                                    schema->primary_key_index,
-                                    &max_id,
-                                    error)) {
-        return -1;
+    index = NULL;
+    max_id = 0;
+
+    if (schema->primary_key_index >= 0) {
+        index = bptree_create();
+        if (index == NULL) {
+            set_runtime_error(error, "PK 인덱스를 만들 수 없습니다.", (SourceLocation){0, 0});
+            return -1;
+        }
+
+        if (!storage_rebuild_pk_index(config, schema, index, &max_id, error)) {
+            bptree_destroy(index);
+            return -1;
+        }
     }
 
     if (max_id == INT_MAX) {
+        bptree_destroy(index);
         set_runtime_error(error, "자동 PK 값이 int 범위를 벗어났습니다.", (SourceLocation){0, 0});
         return -1;
     }
 
-    for (i = 0; i < EXECUTOR_MAX_PK_STATES; i++) {
-        if (!primary_key_states[i].in_use) {
-            primary_key_states[i].in_use = 1;
-            snprintf(primary_key_states[i].schema_dir,
-                     sizeof(primary_key_states[i].schema_dir),
+    for (i = 0; i < EXECUTOR_MAX_TABLE_STATES; i++) {
+        if (!table_states[i].in_use) {
+            table_states[i].in_use = 1;
+            snprintf(table_states[i].schema_dir,
+                     sizeof(table_states[i].schema_dir),
                      "%s",
                      config->schema_dir);
-            snprintf(primary_key_states[i].data_dir,
-                     sizeof(primary_key_states[i].data_dir),
+            snprintf(table_states[i].data_dir,
+                     sizeof(table_states[i].data_dir),
                      "%s",
                      config->data_dir);
-            snprintf(primary_key_states[i].table_name,
-                     sizeof(primary_key_states[i].table_name),
+            snprintf(table_states[i].table_name,
+                     sizeof(table_states[i].table_name),
                      "%s",
                      schema->table_name);
-            primary_key_states[i].next_id = max_id + 1;
+            table_states[i].next_id = max_id + 1;
+            table_states[i].pk_index = index;
             return i;
         }
     }
 
-    set_runtime_error(error, "PK 상태 저장 공간이 부족합니다.", (SourceLocation){0, 0});
+    bptree_destroy(index);
+    set_runtime_error(error, "테이블 상태 저장 공간이 부족합니다.", (SourceLocation){0, 0});
     return -1;
 }
 
-static int get_primary_key_state_index(const AppConfig *config,
-                                       const TableSchema *schema,
-                                       ErrorInfo *error)
+static int get_table_state_index(const AppConfig *config,
+                                 const TableSchema *schema,
+                                 ErrorInfo *error)
 {
     int state_index;
 
-    state_index = find_primary_key_state(config, schema);
+    state_index = find_table_state(config, schema);
     if (state_index >= 0) {
         return state_index;
     }
 
-    return create_primary_key_state(config, schema, error);
+    return create_table_state(config, schema, error);
 }
 
 static int allocate_next_primary_key(const AppConfig *config,
@@ -180,18 +193,18 @@ static int allocate_next_primary_key(const AppConfig *config,
 {
     int state_index;
 
-    state_index = get_primary_key_state_index(config, schema, error);
+    state_index = get_table_state_index(config, schema, error);
     if (state_index < 0) {
         return 0;
     }
 
-    if (primary_key_states[state_index].next_id == INT_MAX) {
+    if (table_states[state_index].next_id == INT_MAX) {
         set_runtime_error(error, "자동 PK 값이 int 범위를 벗어났습니다.", (SourceLocation){0, 0});
         return 0;
     }
 
-    *next_id = primary_key_states[state_index].next_id;
-    primary_key_states[state_index].next_id += 1;
+    *next_id = table_states[state_index].next_id;
+    table_states[state_index].next_id += 1;
     return 1;
 }
 
@@ -201,13 +214,13 @@ static void remember_explicit_primary_key(const AppConfig *config,
 {
     int state_index;
 
-    state_index = find_primary_key_state(config, schema);
+    state_index = find_table_state(config, schema);
     if (state_index < 0 || explicit_id == INT_MAX) {
         return;
     }
 
-    if (primary_key_states[state_index].next_id <= explicit_id) {
-        primary_key_states[state_index].next_id = explicit_id + 1;
+    if (table_states[state_index].next_id <= explicit_id) {
+        table_states[state_index].next_id = explicit_id + 1;
     }
 }
 
@@ -237,14 +250,18 @@ static int validate_primary_key_unique(const AppConfig *config,
                                        ErrorInfo *error)
 {
     int exists;
+    int state_index;
+    long offset;
 
-    if (!storage_int_value_exists(config,
-                                  schema,
-                                  schema->primary_key_index,
-                                  primary_key_value,
-                                  &exists,
-                                  error)) {
+    exists = 0;
+    state_index = get_table_state_index(config, schema, error);
+    if (state_index < 0) {
         return 0;
+    }
+
+    if (table_states[state_index].pk_index != NULL &&
+        bptree_search(table_states[state_index].pk_index, primary_key_value, &offset)) {
+        exists = 1;
     }
 
     if (exists) {
@@ -262,7 +279,6 @@ static int build_insert_row_values(const AppConfig *config,
                                    ErrorInfo *error)
 {
     int used_columns[SQLPROC_MAX_COLUMNS];
-    int explicit_primary_key;
     int i;
 
     /*
@@ -272,7 +288,6 @@ static int build_insert_row_values(const AppConfig *config,
      */
     memset(used_columns, 0, sizeof(used_columns));
     memset(row_values, 0, sizeof(char[SQLPROC_MAX_COLUMNS][SQLPROC_MAX_VALUE_LEN]));
-    explicit_primary_key = 0;
 
     if (!statement->has_column_list) {
         if (statement->value_count != schema->column_count) {
@@ -308,13 +323,6 @@ static int build_insert_row_values(const AppConfig *config,
 
             snprintf(row_values[i], sizeof(row_values[i]), "%s", statement->values[i].text);
 
-            if (i == schema->primary_key_index) {
-                explicit_primary_key = atoi(statement->values[i].text);
-            }
-        }
-
-        if (schema->primary_key_index >= 0) {
-            remember_explicit_primary_key(config, schema, explicit_primary_key);
         }
 
         return 1;
@@ -366,9 +374,6 @@ static int build_insert_row_values(const AppConfig *config,
                  statement->values[i].text);
         used_columns[schema_index] = 1;
 
-        if (schema_index == schema->primary_key_index) {
-            explicit_primary_key = atoi(statement->values[i].text);
-        }
     }
 
     for (i = 0; i < schema->column_count; i++) {
@@ -392,12 +397,6 @@ static int build_insert_row_values(const AppConfig *config,
         }
     }
 
-    if (schema->primary_key_index >= 0 &&
-        used_columns[schema->primary_key_index] &&
-        explicit_primary_key > 0) {
-        remember_explicit_primary_key(config, schema, explicit_primary_key);
-    }
-
     return 1;
 }
 
@@ -407,6 +406,9 @@ static int execute_insert(const AppConfig *config,
 {
     TableSchema schema;
     char row_values[SQLPROC_MAX_COLUMNS][SQLPROC_MAX_VALUE_LEN];
+    long row_offset;
+    int primary_key_value;
+    int has_primary_key;
 
     /*
      * INSERT 실행 흐름:
@@ -422,9 +424,9 @@ static int execute_insert(const AppConfig *config,
         return 0;
     }
 
-    if (schema.primary_key_index >= 0) {
-        int primary_key_value;
-
+    has_primary_key = schema.primary_key_index >= 0;
+    primary_key_value = 0;
+    if (has_primary_key) {
         if (!parse_row_primary_key(&schema, row_values, &primary_key_value, error)) {
             return 0;
         }
@@ -434,7 +436,27 @@ static int execute_insert(const AppConfig *config,
         }
     }
 
-    return storage_append_row(config, &schema, row_values, error);
+    if (!storage_append_row(config, &schema, row_values, &row_offset, error)) {
+        return 0;
+    }
+
+    if (has_primary_key) {
+        int state_index;
+
+        state_index = get_table_state_index(config, &schema, error);
+        if (state_index < 0) {
+            return 0;
+        }
+
+        if (!bptree_insert(table_states[state_index].pk_index, primary_key_value, row_offset)) {
+            set_runtime_error(error, "PK 인덱스에 값을 등록할 수 없습니다.", (SourceLocation){0, 0});
+            return 0;
+        }
+
+        remember_explicit_primary_key(config, &schema, primary_key_value);
+    }
+
+    return 1;
 }
 
 static int resolve_selected_columns(const TableSchema *schema,
@@ -473,6 +495,115 @@ static int resolve_selected_columns(const TableSchema *schema,
 
     return 1;
 }
+
+static int resolve_where_column(const TableSchema *schema,
+                                const SelectStatement *statement,
+                                int *where_column_index,
+                                ErrorInfo *error)
+{
+    *where_column_index = find_schema_column(schema, statement->where_column);
+    if (*where_column_index < 0) {
+        set_runtime_error(error,
+                          "WHERE 대상 컬럼이 스키마에 없습니다.",
+                          statement->where_column_location);
+        return 0;
+    }
+
+    if (!validate_literal_type(schema->columns[*where_column_index].type,
+                               &statement->where_value)) {
+        set_runtime_error(error,
+                          "WHERE 값 타입이 스키마와 맞지 않습니다.",
+                          statement->where_value.location);
+        return 0;
+    }
+
+    if (schema->columns[*where_column_index].type == DATA_TYPE_INT &&
+        !int_literal_in_range(&statement->where_value)) {
+        set_runtime_error(error,
+                          "정수 값이 int 범위를 벗어났습니다.",
+                          statement->where_value.location);
+        return 0;
+    }
+
+    return 1;
+}
+
+static int parse_where_int_value(const LiteralValue *value, int *out_value)
+{
+    char *end_ptr;
+    long parsed_value;
+
+    errno = 0;
+    parsed_value = strtol(value->text, &end_ptr, 10);
+    if (errno == ERANGE || *end_ptr != '\0' ||
+        parsed_value < INT_MIN || parsed_value > INT_MAX) {
+        return 0;
+    }
+
+    *out_value = (int)parsed_value;
+    return 1;
+}
+
+static int execute_select_with_index(const AppConfig *config,
+                                     const TableSchema *schema,
+                                     const SelectStatement *statement,
+                                     const int selected_indices[SQLPROC_MAX_COLUMNS],
+                                     int selected_count,
+                                     ErrorInfo *error)
+{
+    int state_index;
+    int target_id;
+    long row_offset;
+
+    if (!parse_where_int_value(&statement->where_value, &target_id)) {
+        set_runtime_error(error,
+                          "정수 값이 int 범위를 벗어났습니다.",
+                          statement->where_value.location);
+        return 0;
+    }
+
+    state_index = get_table_state_index(config, schema, error);
+    if (state_index < 0) {
+        return 0;
+    }
+
+    printf("[INDEX] WHERE %s = %s\n",
+           statement->where_column,
+           statement->where_value.text);
+
+    if (!bptree_search(table_states[state_index].pk_index, target_id, &row_offset)) {
+        row_offset = -1;
+    }
+
+    return storage_print_row_at_offset(config,
+                                       schema,
+                                       row_offset,
+                                       selected_indices,
+                                       selected_count,
+                                       error);
+}
+
+static int execute_select_with_scan(const AppConfig *config,
+                                    const TableSchema *schema,
+                                    const SelectStatement *statement,
+                                    const int selected_indices[SQLPROC_MAX_COLUMNS],
+                                    int selected_count,
+                                    int where_column_index,
+                                    ErrorInfo *error)
+{
+    printf("[SCAN] WHERE %s = %s\n",
+           statement->where_column,
+           statement->where_value.text);
+
+    return storage_print_rows_where_equals(config,
+                                           schema,
+                                           selected_indices,
+                                           selected_count,
+                                           where_column_index,
+                                           &statement->where_value,
+                                           error);
+}
+
 static int execute_select(const AppConfig *config,
                           const SelectStatement *statement,
                           ErrorInfo *error)
@@ -480,6 +611,7 @@ static int execute_select(const AppConfig *config,
     TableSchema schema;
     int selected_indices[SQLPROC_MAX_COLUMNS];
     int selected_count;
+    int where_column_index;
 
     /*
      * SELECT 실행 흐름:
@@ -498,7 +630,32 @@ static int execute_select(const AppConfig *config,
         return 0;
     }
 
-    return storage_print_rows(config, &schema, selected_indices, selected_count, error);
+    if (!statement->has_where) {
+        return storage_print_rows(config, &schema, selected_indices, selected_count, error);
+    }
+
+    if (!resolve_where_column(&schema, statement, &where_column_index, error)) {
+        return 0;
+    }
+
+    if (schema.primary_key_index >= 0 &&
+        where_column_index == schema.primary_key_index &&
+        statement->where_value.type == LITERAL_INT) {
+        return execute_select_with_index(config,
+                                         &schema,
+                                         statement,
+                                         selected_indices,
+                                         selected_count,
+                                         error);
+    }
+
+    return execute_select_with_scan(config,
+                                    &schema,
+                                    statement,
+                                    selected_indices,
+                                    selected_count,
+                                    where_column_index,
+                                    error);
 }
 
 int execute_program(const AppConfig *config, const SqlProgram *program, ErrorInfo *error)

@@ -3,6 +3,8 @@
 
 #include <stddef.h>
 
+#include "bptree.h"
+
 /*
  * 이 헤더는 프로젝트 전체에서 공유하는 "공용 계약"입니다.
  * - 최대 길이 상수
@@ -37,11 +39,13 @@ typedef enum {
     TOKEN_LPAREN,
     TOKEN_RPAREN,
     TOKEN_STAR,
+    TOKEN_EQUAL,
     TOKEN_KEYWORD_INSERT,
     TOKEN_KEYWORD_INTO,
     TOKEN_KEYWORD_VALUES,
     TOKEN_KEYWORD_SELECT,
-    TOKEN_KEYWORD_FROM
+    TOKEN_KEYWORD_FROM,
+    TOKEN_KEYWORD_WHERE
 } TokenType;
 
 /* 파서가 구분하는 최상위 SQL 문장 종류입니다. */
@@ -136,6 +140,10 @@ typedef struct {
     int column_count;
     char column_names[SQLPROC_MAX_COLUMNS][SQLPROC_MAX_NAME_LEN];
     SourceLocation column_locations[SQLPROC_MAX_COLUMNS];
+    int has_where;
+    char where_column[SQLPROC_MAX_NAME_LEN];
+    SourceLocation where_column_location;
+    LiteralValue where_value;
 } SelectStatement;
 
 /* SQL 문장 1개입니다. INSERT 또는 SELECT 중 하나를 담습니다. */
@@ -174,12 +182,26 @@ int load_table_schema(const char *schema_dir,
 int storage_append_row(const AppConfig *config,
                        const TableSchema *schema,
                        char row_values[SQLPROC_MAX_COLUMNS][SQLPROC_MAX_VALUE_LEN],
+                       long *out_offset,
                        ErrorInfo *error);
 int storage_print_rows(const AppConfig *config,
                        const TableSchema *schema,
                        const int selected_indices[SQLPROC_MAX_COLUMNS],
                        int selected_count,
                        ErrorInfo *error);
+int storage_print_row_at_offset(const AppConfig *config,
+                                const TableSchema *schema,
+                                long offset,
+                                const int selected_indices[SQLPROC_MAX_COLUMNS],
+                                int selected_count,
+                                ErrorInfo *error);
+int storage_print_rows_where_equals(const AppConfig *config,
+                                    const TableSchema *schema,
+                                    const int selected_indices[SQLPROC_MAX_COLUMNS],
+                                    int selected_count,
+                                    int where_column_index,
+                                    const LiteralValue *where_value,
+                                    ErrorInfo *error);
 int storage_find_max_int_value(const AppConfig *config,
                                const TableSchema *schema,
                                int column_index,
@@ -190,6 +212,11 @@ int storage_int_value_exists(const AppConfig *config,
                              int column_index,
                              int target_value,
                              int *exists,
+                             ErrorInfo *error);
+int storage_rebuild_pk_index(const AppConfig *config,
+                             const TableSchema *schema,
+                             BPlusTree *index,
+                             int *max_value,
                              ErrorInfo *error);
 
 /* executor.c — SQL 문장 실행 흐름 제어 */
