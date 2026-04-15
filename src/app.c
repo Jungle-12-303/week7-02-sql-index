@@ -14,7 +14,18 @@
 
 static int run_sql_text(const AppConfig *config, const char *sql_text, ErrorInfo *error);
 
-int parse_arguments(int argc, char **argv, AppConfig *config)
+static void set_argument_error(ErrorInfo *error, const char *message)
+{
+    if (error == NULL) {
+        return;
+    }
+
+    snprintf(error->message, sizeof(error->message), "%s", message);
+    error->line = 0;
+    error->column = 0;
+}
+
+int parse_arguments(int argc, char **argv, AppConfig *config, ErrorInfo *error)
 {
     int i;
 
@@ -22,10 +33,13 @@ int parse_arguments(int argc, char **argv, AppConfig *config)
      * 지원하는 실행 형식:
      *   ./sqlproc --schema-dir <dir> --data-dir <dir> <input.sql>
      *   ./sqlproc --schema-dir <dir> --data-dir <dir> --interactive
-     *   -> argc == 6
+     *
+     * 옵션 순서는 자유롭게 두되,
+     * schema/data 디렉터리와 실행 모드(file 또는 interactive)는
+     * 반드시 한 번씩만 지정하도록 검사합니다.
      */
-    if (argc != 6) {
-        return 0;
+    if (error != NULL) {
+        memset(error, 0, sizeof(*error));
     }
 
     /*
@@ -33,31 +47,92 @@ int parse_arguments(int argc, char **argv, AppConfig *config)
      */
     memset(config, 0, sizeof(*config));
 
-    /*
-     * argv는 "--옵션 값" 쌍으로 들어오므로 2칸씩 전진합니다.
-     * 마지막 인자(argv[5])는 SQL 파일 경로입니다.
-     */
-    for (i = 1; i < argc - 1; i += 2) {
+    if (argc <= 1) {
+        set_argument_error(error, "실행 인자가 없습니다.");
+        return 0;
+    }
+
+    for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--schema-dir") == 0) {
-            snprintf(config->schema_dir, sizeof(config->schema_dir), "%s", argv[i + 1]);
+            if (config->schema_dir[0] != '\0') {
+                set_argument_error(error, "--schema-dir 옵션이 중복되었습니다.");
+                return 0;
+            }
+
+            if (i + 1 >= argc) {
+                set_argument_error(error, "--schema-dir 뒤에 디렉터리 경로가 필요합니다.");
+                return 0;
+            }
+
+            i += 1;
+            snprintf(config->schema_dir, sizeof(config->schema_dir), "%s", argv[i]);
         } else if (strcmp(argv[i], "--data-dir") == 0) {
-            snprintf(config->data_dir, sizeof(config->data_dir), "%s", argv[i + 1]);
-        } else {
+            if (config->data_dir[0] != '\0') {
+                set_argument_error(error, "--data-dir 옵션이 중복되었습니다.");
+                return 0;
+            }
+
+            if (i + 1 >= argc) {
+                set_argument_error(error, "--data-dir 뒤에 디렉터리 경로가 필요합니다.");
+                return 0;
+            }
+
+            i += 1;
+            snprintf(config->data_dir, sizeof(config->data_dir), "%s", argv[i]);
+        } else if (strcmp(argv[i], "--interactive") == 0) {
+            if (config->interactive_mode) {
+                set_argument_error(error, "--interactive 옵션이 중복되었습니다.");
+                return 0;
+            }
+
+            if (config->input_path[0] != '\0') {
+                set_argument_error(error,
+                                   "SQL 파일 경로와 --interactive는 함께 사용할 수 없습니다.");
+                return 0;
+            }
+
+            config->interactive_mode = 1;
+        } else if (strncmp(argv[i], "--", 2) == 0) {
+            char message[SQLPROC_MAX_ERROR_LEN];
+
+            snprintf(message,
+                     sizeof(message),
+                     "알 수 없는 옵션입니다: %s",
+                     argv[i]);
+            set_argument_error(error, message);
             return 0;
+        } else {
+            if (config->interactive_mode) {
+                set_argument_error(error,
+                                   "SQL 파일 경로와 --interactive는 함께 사용할 수 없습니다.");
+                return 0;
+            }
+
+            if (config->input_path[0] != '\0') {
+                set_argument_error(error, "SQL 파일 경로는 하나만 지정할 수 있습니다.");
+                return 0;
+            }
+
+            snprintf(config->input_path, sizeof(config->input_path), "%s", argv[i]);
         }
     }
 
     /*
      * schema_dir, data_dir는 항상 필요합니다.
      */
-    if (config->schema_dir[0] == '\0' || config->data_dir[0] == '\0') {
+    if (config->schema_dir[0] == '\0') {
+        set_argument_error(error, "--schema-dir 옵션이 필요합니다.");
         return 0;
     }
 
-    if (strcmp(argv[argc - 1], "--interactive") == 0) {
-        config->interactive_mode = 1;
-    } else {
-        snprintf(config->input_path, sizeof(config->input_path), "%s", argv[argc - 1]);
+    if (config->data_dir[0] == '\0') {
+        set_argument_error(error, "--data-dir 옵션이 필요합니다.");
+        return 0;
+    }
+
+    if (!config->interactive_mode && config->input_path[0] == '\0') {
+        set_argument_error(error, "SQL 파일 경로 또는 --interactive 중 하나가 필요합니다.");
+        return 0;
     }
 
     return 1;
@@ -79,7 +154,10 @@ int load_sql_file(const char *path, char *buffer, size_t buffer_size, ErrorInfo 
      */
     file = fopen(path, "rb");
     if (file == NULL) {
-        snprintf(error->message, sizeof(error->message), "SQL 파일을 열 수 없습니다.");
+        snprintf(error->message,
+                 sizeof(error->message),
+                 "SQL 파일을 열 수 없습니다: %s",
+                 path);
         return 0;
     }
 
@@ -89,7 +167,10 @@ int load_sql_file(const char *path, char *buffer, size_t buffer_size, ErrorInfo 
     total_size = fread(buffer, 1, buffer_size - 1, file);
     if (ferror(file)) {
         fclose(file);
-        snprintf(error->message, sizeof(error->message), "SQL 파일을 읽는 중 오류가 발생했습니다.");
+        snprintf(error->message,
+                 sizeof(error->message),
+                 "SQL 파일을 읽는 중 오류가 발생했습니다: %s",
+                 path);
         return 0;
     }
 
@@ -104,7 +185,10 @@ int load_sql_file(const char *path, char *buffer, size_t buffer_size, ErrorInfo 
         extra_size = fread(&probe, 1, 1, file);
         if (extra_size > 0) {
             fclose(file);
-            snprintf(error->message, sizeof(error->message), "SQL 파일이 너무 큽니다.");
+            snprintf(error->message,
+                     sizeof(error->message),
+                     "SQL 파일이 너무 큽니다: %s",
+                     path);
             return 0;
         }
     }

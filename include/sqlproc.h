@@ -183,7 +183,7 @@ typedef struct {
 } SqlProgram;
 
 /* app.c — 인자 파싱, SQL 파일 읽기, 실행 진입 */
-int parse_arguments(int argc, char **argv, AppConfig *config);
+int parse_arguments(int argc, char **argv, AppConfig *config, ErrorInfo *error);
 int load_sql_file(const char *path, char *buffer, size_t buffer_size, ErrorInfo *error);
 int run_program(const AppConfig *config);
 void print_error(const ErrorInfo *error);

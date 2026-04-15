@@ -62,6 +62,7 @@ static int make_temp_directory(char *path_template)
 static int test_parse_arguments_success(void)
 {
     AppConfig config;
+    ErrorInfo error;
     char *argv[] = {
         "sqlproc",
         "--schema-dir", "schemas",
@@ -69,7 +70,7 @@ static int test_parse_arguments_success(void)
         "input.sql"
     };
 
-    if (!parse_arguments(6, argv, &config)) {
+    if (!parse_arguments(6, argv, &config, &error)) {
         return 0;
     }
 
@@ -91,6 +92,7 @@ static int test_parse_arguments_success(void)
 static int test_parse_arguments_fail(void)
 {
     AppConfig config;
+    ErrorInfo error;
     char *argv[] = {
         "sqlproc",
         "--schema-dir", "schemas",
@@ -98,7 +100,69 @@ static int test_parse_arguments_fail(void)
         "input.sql"
     };
 
-    return !parse_arguments(5, argv, &config);
+    if (parse_arguments(5, argv, &config, &error)) {
+        return 0;
+    }
+
+    return strstr(error.message, "SQL 파일 경로 또는 --interactive") != NULL;
+}
+
+static int test_parse_arguments_any_order_interactive_success(void)
+{
+    AppConfig config;
+    ErrorInfo error;
+    char *argv[] = {
+        "sqlproc",
+        "--interactive",
+        "--data-dir", "data",
+        "--schema-dir", "schemas"
+    };
+
+    if (!parse_arguments(6, argv, &config, &error)) {
+        return 0;
+    }
+
+    return config.interactive_mode == 1 &&
+           strcmp(config.schema_dir, "schemas") == 0 &&
+           strcmp(config.data_dir, "data") == 0 &&
+           config.input_path[0] == '\0';
+}
+
+static int test_parse_arguments_unknown_option_fail(void)
+{
+    AppConfig config;
+    ErrorInfo error;
+    char *argv[] = {
+        "sqlproc",
+        "--schema", "schemas",
+        "--data-dir", "data",
+        "input.sql"
+    };
+
+    if (parse_arguments(6, argv, &config, &error)) {
+        return 0;
+    }
+
+    return strstr(error.message, "알 수 없는 옵션입니다") != NULL;
+}
+
+static int test_parse_arguments_conflicting_mode_fail(void)
+{
+    AppConfig config;
+    ErrorInfo error;
+    char *argv[] = {
+        "sqlproc",
+        "--schema-dir", "schemas",
+        "--data-dir", "data",
+        "--interactive",
+        "input.sql"
+    };
+
+    if (parse_arguments(7, argv, &config, &error)) {
+        return 0;
+    }
+
+    return strstr(error.message, "--interactive") != NULL;
 }
 
 static int test_tokenize_select(void)
@@ -1635,6 +1699,21 @@ int main(void)
 
     if (!test_parse_arguments_fail()) {
         fprintf(stderr, "test_parse_arguments_fail failed\n");
+        return 1;
+    }
+
+    if (!test_parse_arguments_any_order_interactive_success()) {
+        fprintf(stderr, "test_parse_arguments_any_order_interactive_success failed\n");
+        return 1;
+    }
+
+    if (!test_parse_arguments_unknown_option_fail()) {
+        fprintf(stderr, "test_parse_arguments_unknown_option_fail failed\n");
+        return 1;
+    }
+
+    if (!test_parse_arguments_conflicting_mode_fail()) {
+        fprintf(stderr, "test_parse_arguments_conflicting_mode_fail failed\n");
         return 1;
     }
 

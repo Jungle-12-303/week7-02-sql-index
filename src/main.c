@@ -16,11 +16,26 @@
  *   SQL 파일 경로를 주면 파일 실행 모드로 동작합니다.
  *   --interactive를 주면 sqlproc> 프롬프트에서 SQL을 한 줄씩 입력합니다.
  */
-static void print_usage(void)
+static void print_usage(const char *program_name)
 {
+    const char *display_name;
+
+    display_name = "./sqlproc";
+    if (program_name != NULL && program_name[0] != '\0') {
+        display_name = program_name;
+    }
+
     fprintf(stderr,
-            "usage: ./sqlproc --schema-dir <dir> --data-dir <dir> <input.sql>\n"
-            "       ./sqlproc --schema-dir <dir> --data-dir <dir> --interactive\n");
+            "사용법:\n"
+            "  %s --schema-dir <dir> --data-dir <dir> <input.sql>\n"
+            "  %s --schema-dir <dir> --data-dir <dir> --interactive\n"
+            "\n"
+            "옵션:\n"
+            "  --schema-dir <dir>  .schema 파일이 있는 디렉터리\n"
+            "  --data-dir <dir>    .csv 파일을 읽고 쓰는 디렉터리\n"
+            "  --interactive       파일 대신 프롬프트에서 SQL 한 줄씩 입력\n",
+            display_name,
+            display_name);
 }
 
 int main(int argc, char **argv)
@@ -32,6 +47,7 @@ int main(int argc, char **argv)
      * - input_path: 실행할 SQL 파일 경로
      */
     AppConfig config;
+    ErrorInfo error;
 
     /*
      * argc / argv는 main 함수가 운영체제로부터 받는 기본 명령행 인자입니다.
@@ -52,12 +68,13 @@ int main(int argc, char **argv)
      *
      * parse_arguments는 이 값을 읽어 config 구조체로 정리합니다.
      */
-    if (!parse_arguments(argc, argv, &config)) {
+    if (!parse_arguments(argc, argv, &config, &error)) {
         /*
          * 인자 형식이 잘못되면 실제 실행을 진행하지 않고
-         * 사용법 문자열만 stderr로 출력한 뒤 종료합니다.
+         * 이유와 사용법을 함께 stderr로 출력한 뒤 종료합니다.
          */
-        print_usage();
+        print_error(&error);
+        print_usage(argv[0]);
         return 1;
     }
 
