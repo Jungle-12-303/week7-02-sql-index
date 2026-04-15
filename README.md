@@ -108,7 +108,52 @@ elapsed: ... ms
 
 ---
 
-## 6. B+ Tree 핵심 구현
+## 6. 왜 B+ Tree를 쓰는가
+
+단순히 CSV를 처음부터 끝까지 읽으면 원하는 `id` 하나를 찾기 위해 모든 row를 확인해야 합니다.  
+반대로 B+ Tree는 key가 정렬된 트리 구조라서 root에서 leaf까지 필요한 경로만 따라가면 됩니다.  
+데이터가 많아질수록 전체 row 수를 모두 보는 방식과, tree 높이만큼만 이동하는 방식의 차이가 커집니다.
+
+```text
+CSV 선형 탐색 : row 1 -> row 2 -> row 3 -> ... -> target
+B+ Tree 탐색 : root -> internal node -> leaf -> target offset
+```
+
+또 하나의 장점은 메모리 사용 방식입니다.  
+CSV 전체를 메모리에 struct 배열로 올리면 검색은 파일 I/O보다 빨라질 수 있지만, 모든 컬럼 값을 메모리에 복사해야 합니다.
+
+예를 들어 현재 `users` row를 C 구조체로 올린다고 생각하면 대략 아래와 같습니다.
+
+```c
+typedef struct {
+    int id;          /* 4 bytes */
+    char name[64];   /* 64 bytes */
+    int age;         /* 4 bytes */
+} UserRow;
+```
+
+이 방식은 row 하나당 최소 약 72 bytes가 필요하고, 1,000,000건이면 약 72MB 이상을 사용합니다.  
+반면 현재 B+ Tree 인덱스는 row 전체를 저장하지 않고 `id`와 `offset`만 저장합니다.
+
+```text
+id      : int  4 bytes
+offset  : long 8 bytes
+payload : 약 12 bytes / row
+```
+
+실제 B+ Tree에는 node 포인터와 split 관리를 위한 추가 메모리가 붙습니다.  
+그래도 핵심 차이는 명확합니다. struct 배열 방식은 `name`, `age` 같은 실제 데이터를 모두 복사하지만, B+ Tree 방식은 “어디로 가면 되는지”만 기억합니다.  
+즉 데이터 본문은 CSV에 두고, 메모리에는 검색에 필요한 최소 정보만 올리는 구조입니다.
+
+| 방식 | 메모리에 올리는 것 | 장점 | 단점 |
+| --- | --- | --- | --- |
+| CSV 선형 탐색 | 거의 없음 | 구현이 단순함 | 매번 전체 row를 읽음 |
+| CSV 전체 struct 적재 | 모든 row의 모든 컬럼 | 파일 I/O 없이 탐색 가능 | 메모리 사용량이 큼, 조건에 따라 여전히 선형 탐색 |
+| B+ Tree 인덱스 | `id -> offset` | PK 조회가 빠르고 메모리 사용이 작음 | 인덱스 생성/유지 비용이 있음 |
+
+---
+
+## 7. B+ Tree 핵심 구현
 
 
 <img width="5200" height="2732" alt="image" src="https://github.com/user-attachments/assets/6cfce597-0ea3-4630-8ac1-804aabbfa5eb" />
@@ -128,7 +173,7 @@ leaf next        : id > ?, id < ? 범위 조회에서 순차 이동에 사용
 
 ---
 
-## 7. 메모리 인덱스 재구성
+## 8. 메모리 인덱스 재구성
 
 이번 인덱스는 디스크에 저장하지 않는 메모리 기반 구조입니다.  
 따라서 프로그램을 새로 실행하면 B+ Tree는 비어 있고, 기존 CSV 데이터와 다시 연결하는 과정이 필요합니다.
