@@ -11,6 +11,8 @@
 - 목표 저장 방식: `CSV`
 - 목표 실행 방식:
   - SQL 파일 실행 모드
+  - interactive 모드
+  - benchmark 모드
 
 ## 2. 구현 필요 기능
 
@@ -88,6 +90,8 @@ id:int,name:string,age:int
   공개 상수, 스키마 구조체, 함수 선언
 - [src/app.c](/Users/donghyunkim/Downloads/test_sql/week6-team5-sql/src/app.c)
   인자 파싱, SQL 파일 실행
+- [src/benchmark.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/benchmark.c)
+  benchmark 프롬프트, 더미 데이터/SQL 생성, PK vs non-PK 시간 측정
 - [src/main.c](/Users/donghyunkim/Downloads/test_sql/week6-team5-sql/src/main.c)
   CLI 진입점
 - [src/tokenizer.c](/Users/donghyunkim/Downloads/test_sql/week6-team5-sql/src/tokenizer.c)
@@ -150,6 +154,7 @@ id:int,name:string,age:int
 git status --short --branch
 git log --oneline --decorate -5
 make test
+make bench
 ```
 
 ## 9. 구현 후 기본 검증
@@ -158,7 +163,8 @@ make test
 
 1. `make`
 2. `make test`
-3. 변경된 README 예시나 CLI 예시를 실제로 한 번 실행
+3. `make bench` 또는 `./build/sqlproc --benchmark` 한 번 실행
+4. 변경된 README 예시나 CLI 예시를 실제로 한 번 실행
 
 배치 예시:
 

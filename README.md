@@ -8,7 +8,7 @@
 | --- | --- |
 | 목표 | PK 조회 시 B+ Tree 인덱스를 사용하는 흐름을 눈에 보이게 구현 |
 | 이번 주 핵심 | `WHERE id = ?`는 B+ Tree, 그 외 조건은 CSV 선형 탐색 |
-| 입력 | `.sql` 파일 또는 `--interactive` |
+| 입력 | `.sql` 파일, `--interactive`, `--benchmark` |
 | 출력 | 표준 출력 + `.csv` 파일 |
 | 지원 문장 | `INSERT`, `SELECT` |
 | 지원 WHERE | 단일 조건 `=`, `>`, `<`, `!=` |
@@ -21,7 +21,7 @@
 
 ```mermaid
 flowchart LR
-    A["SQL File / Interactive Input"] --> B["Tokenizer"]
+    A["SQL File / Interactive / Benchmark Input"] --> B["Tokenizer"]
     B --> C["Parser"]
     C --> D["Executor"]
     D -->|"load_table_schema()"| E["schema.c"]
@@ -100,7 +100,7 @@ flowchart LR
 | 단계 | 함수 / 파일 | 핵심 역할 |
 | --- | --- | --- |
 | 1 | `main.c` | 프로그램 진입점 |
-| 2 | `app.c` | SQL 파일 읽기 또는 interactive 입력 처리 |
+| 2 | `app.c` + `benchmark.c` | SQL 파일 읽기, interactive 입력, benchmark 실행 처리 |
 | 3 | `tokenizer.c` | SQL 문자열을 토큰 배열로 분리 |
 | 4 | `parser.c` | 토큰 배열을 `SqlProgram`으로 변환 |
 | 5 | `executor.c` + `storage.c` + `schema.c` + `bptree.c` | 스키마 확인, PK 검증, 인덱스/CSV 반영 |
@@ -160,7 +160,7 @@ flowchart LR
 | `TokenList` | SQL 문자열을 잘라낸 토큰 배열 | `tokenizer.c` | `Token[]` |
 | `SqlProgram` | 파싱된 SQL 문장 목록 | `parser.c` | `Statement[]` |
 | `Statement` | `INSERT` / `SELECT` 구분 단위 | `parser.c` | `InsertStatement` or `SelectStatement` |
-| `AppConfig` | 실행 경로와 interactive 모드 설정 | `app.c` | `schema_dir`, `data_dir`, `input_path`, `interactive_mode` |
+| `AppConfig` | 실행 경로와 interactive/benchmark 모드 설정 | `app.c` | `schema_dir`, `data_dir`, `input_path`, `interactive_mode`, `benchmark_mode` |
 | `InsertStatement` | 테이블명, 컬럼명[], 값[] | `parser.c` | `LiteralValue[]` |
 | `SelectStatement` | 테이블명, `select_all`, 컬럼명[] | `parser.c` | — |
 | `TableSchema` | 컬럼 순서·타입·PK 위치 정의 | `schema.c` | `ColumnSchema[]`, `primary_key_index` |
@@ -240,62 +240,66 @@ mkdir demo-data
 
 ```bash
 make bench
-./build/bench_index
 ```
 
 빠르게 시연하려면 아래 순서가 가장 이해하기 쉽습니다.
 
 1. `./build/sqlproc --schema-dir ./examples/schemas --data-dir ./demo-data ./examples/index_demo.sql`
 2. `./build/sqlproc --schema-dir ./examples/schemas --data-dir ./demo-data ./examples/perf_compare.sql`
-3. `./build/bench_index`
+3. `./build/sqlproc --schema-dir ./examples/schemas --data-dir ./demo-data --benchmark`
 
-기본값은 1,000,000개 레코드입니다. 더 작은 값으로 빠르게 확인하려면 아래처럼 실행할 수 있습니다.
+`make bench`는 이제 `sqlproc --benchmark`를 실행합니다. 벤치마크를 시작하면
+아래 프롬프트가 뜨고, 입력한 개수만큼 `demo-data/benchmark/` 아래에 더미
+CSV와 조회용 SQL 파일 2개를 만듭니다.
 
-```bash
-./build/bench_index 10000
+```text
+>> 벤치마크를 위한 더미 데이터는 몇 개를 생성하시겠습니까? : 1000000
 ```
 
-`sqlproc`에서 바로 조회할 수 있는 100만 건 CSV를 만들려면 아래 명령을 사용합니다.
+벤치마크는 같은 `sqlproc` 파일 실행 경로로 아래 3가지를 순서대로 재며,
+쿼리 결과 자체는 숨기고 요약 표만 보여 줍니다.
 
-```bash
-make seed-demo-data
-./build/sqlproc --schema-dir ./examples/schemas --data-dir ./demo-data --interactive
+- `PK (id, cold)` — 첫 PK 조회와 인덱스 재구성 비용 포함
+- `PK (id, warm)` — 같은 PK를 한 번 더 조회한 warm lookup
+- `not PK (name)` — PK가 아닌 `name` equality 선형 탐색
+
+예시 출력은 아래와 같습니다.
+
+```text
+============= 벤치마크 결과 =============
+PK (id, cold)                    309.519ms
+PK (id, warm)                      0.060ms
+not PK (name)                     91.877ms
+========================================
+
+sqlproc interactive mode
+type .exit to quit
+sqlproc>
 ```
 
-이후 대화형 모드에서 아래처럼 확인할 수 있습니다.
+벤치마크가 끝나면 자동으로 일반 interactive 모드로 넘어갑니다. 이때
+interactive는 원래 전달한 `--schema-dir`, `--data-dir`를 그대로 사용하고,
+벤치마크 데이터는 `data_dir/benchmark/` 아래에 따로 남습니다.
 
-```sql
-SELECT * FROM users WHERE id = 900000;
-SELECT * FROM users WHERE id > 999990;
-SELECT id, name FROM users WHERE age != 20;
-SELECT name, age FROM users WHERE name = 'user900000';
-```
-
-레코드 수나 출력 파일을 바꾸고 싶으면 `make` 변수로 조절할 수 있습니다.
-
-```bash
-make seed-demo-data RECORDS=10000
-make seed-demo-data RECORDS=1000000 DATA_PATH=demo-data/users.csv
-```
-
-시간 차이를 바로 비교하려면 아래 예제를 실행합니다. 각 `SELECT` 뒤에
-`elapsed: ... ms`가 출력됩니다.
+시간 차이를 직접 눈으로 보고 싶으면 기존처럼 아래 예제를 실행할 수 있습니다.
+각 `SELECT` 뒤에 `elapsed: ... ms`가 출력됩니다.
 
 ```bash
 ./build/sqlproc --schema-dir ./examples/schemas --data-dir ./demo-data ./examples/perf_compare.sql
 ```
 
-`bench_index`는 CSV를 직접 만들고 B+ Tree와 선형 탐색 비용을 비교하는
-보조 벤치마크 도구입니다. parser/executor까지 포함한 전체 데모는 위
-`perf_compare.sql` 또는 `index_demo.sql`로 확인할 수 있습니다.
+기존 `bench_index`는 하위 호환용 보조 도구로 남겨 두었습니다. 다만
+parser/executor까지 포함한 전체 데모와 발표용 시연 경로는 이제
+`sqlproc --benchmark`를 기준으로 보는 편이 좋습니다.
 
-예시 측정 결과도 함께 남깁니다. 아래 수치는 `2026-04-15`에
-`./build/bench_index 1000000 /tmp/bench-users-1m.csv`로 실행한 로컬 결과이며,
+예시 측정 결과도 함께 남깁니다. 아래 수치는 `2026-04-16`에
+`./build/sqlproc --schema-dir ./examples/schemas --data-dir /tmp/sqlproc-bench-doc --benchmark`
+로 실행해 `1000000`을 입력한 로컬 결과이며,
 환경에 따라 달라질 수 있습니다.
 
-| 레코드 수 | PK 조회 (`id = 900000`) | 비-PK 조회 (`name = 'user900000'`) |
-| --- | --- | --- |
-| 1,000,000 | `0.002000 ms` | `86.038 ms` |
+| 레코드 수 | PK cold (`id = 900000`) | PK warm (`id = 900000`) | 비-PK (`name = 'user900000'`) |
+| --- | --- | --- | --- |
+| 1,000,000 | `309.519ms` | `0.060ms` | `91.877ms` |
 
 - 스키마에 `id:int` 컬럼이 있으면 PK로 인식하고, `INSERT`에서 `id`를 빼면 현재 최대값 + 1을 자동 부여합니다.
 - 이미 존재하는 `id`를 넣으면 `PK 값이 이미 존재합니다.` 오류로 거절합니다.
@@ -308,7 +312,9 @@ make seed-demo-data RECORDS=1000000 DATA_PATH=demo-data/users.csv
 - 새 데이터 디렉터리를 쓸 때는 먼저 `mkdir -p /tmp/sqlproc-data`처럼 부모 디렉터리를 만들어 두어야 합니다.
 - 파일 모드: `./build/sqlproc --schema-dir ./examples/schemas --data-dir /tmp/sqlproc-data ./examples/demo.sql`
 - interactive 모드: `./build/sqlproc --schema-dir ./examples/schemas --data-dir /tmp/sqlproc-data --interactive`
+- benchmark 모드: `./build/sqlproc --schema-dir ./examples/schemas --data-dir /tmp/sqlproc-data --benchmark`
 - interactive 모드에서는 `sqlproc>` 프롬프트에서 SQL 한 줄씩 입력하고 `.exit`로 종료합니다.
+- benchmark 모드에서는 더미 데이터 개수를 먼저 입력하고, 결과 표가 끝나면 곧바로 `sqlproc>` 프롬프트로 이어집니다.
 
 ## 시연 예시
 

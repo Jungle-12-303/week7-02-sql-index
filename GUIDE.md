@@ -23,7 +23,7 @@ C를 막 배운 사람이 이 프로젝트를 처음 읽을 때 참고하는 문
 
 ## 1. 프로젝트 한 줄 요약
 
-> **SQL 파일이나 interactive 입력을 실행하면, CSV 파일에 데이터를 읽고 쓰는 미니 데이터베이스**
+> **SQL 파일, interactive 입력, benchmark 모드를 실행하면 CSV 파일을 읽고 쓰는 미니 데이터베이스**
 
 지원하는 SQL:
 
@@ -66,6 +66,7 @@ week6-team5-sql/
 ├── src/
 │   ├── main.c          ← 프로그램 시작점 (진입점)
 │   ├── app.c           ← 명령줄 인자 파싱, 파일/interactive 실행
+│   ├── benchmark.c     ← benchmark 프롬프트, 더미 데이터/SQL 준비, 시간 측정
 │   ├── tokenizer.c     ← SQL 문자열 → 토큰 조각
 │   ├── parser.c        ← 토큰 → SQL 문장 구조체
 │   ├── schema.c        ← 테이블 스키마 파일 읽기
@@ -98,7 +99,7 @@ tokenizer.c  parser.c  executor.c  storage.c ...  (실제 구현체)
 
 ```mermaid
 flowchart TD
-    A(["input.sql 파일\n또는 interactive 입력"]) --> B["app.c\n입력 읽기와 실행 모드 분기"]
+    A(["input.sql 파일\ninteractive 입력\n또는 benchmark 입력"]) --> B["app.c / benchmark.c\n입력 읽기와 실행 모드 분기"]
     B --> C["tokenizer.c\n문자열 → 토큰 배열"]
     C --> D["parser.c\n토큰 → SQL 문장 구조체"]
     D --> E["executor.c\nSQL 검증 및 실행 흐름 제어"]
@@ -170,7 +171,8 @@ graph LR
 | 파일 | 주요 함수 | 한 줄 설명 |
 |------|-----------|------------|
 | `main.c` | `main()` | 인자 파싱 후 `run_program()` 호출 |
-| `app.c` | `parse_arguments()`, `run_program()`, `load_sql_file()` | 인자 검증, 파일/interactive 모드 분기, 파이프라인 실행 |
+| `app.c` | `parse_arguments()`, `run_program()`, `load_sql_file()`, `run_sql_file()` | 인자 검증, 파일/interactive/benchmark 모드 분기, 공용 파일 실행 파이프라인 |
+| `benchmark.c` | `run_benchmark_mode()` | 더미 데이터 생성, PK cold/warm와 non-PK 시간 측정, 결과 표 출력 |
 | `tokenizer.c` | `tokenize_sql()` | 문자열을 `TokenList`로 변환 |
 | `parser.c` | `parse_program()` | `TokenList`를 `SqlProgram`으로 변환 |
 | `schema.c` | `load_table_schema()` | `.schema` 파일 읽어 `TableSchema` 반환 |
@@ -278,12 +280,15 @@ classDiagram
 typedef struct {
     char schema_dir[256];  // --schema-dir 값
     char data_dir[256];    // --data-dir 값
-    char input_path[256];  // SQL 파일 경로
-    int interactive_mode;  // 1이면 --interactive
+    char input_path[256];   // SQL 파일 경로
+    int interactive_mode;   // 1이면 --interactive
+    int benchmark_mode;     // 1이면 --benchmark
 } AppConfig;
 ```
 
 `interactive_mode == 1`이면 `input_path` 대신 `stdin`에서 한 줄씩 읽습니다.
+`benchmark_mode == 1`이면 먼저 benchmark 전용 CSV와 SQL 파일을 만들고,
+그 뒤 같은 실행 안에서 interactive 모드로 이어집니다.
 
 ---
 
@@ -526,9 +531,11 @@ TableSchema {
 ### 현재 PK 정책
 
 - `id:int` 컬럼이 있으면 현재 구현에서는 그 컬럼을 PK처럼 다룹니다.
-- `INSERT`에서 `id`가 빠지면 `storage_find_max_int_value()`로 기존 최대값을 찾은 뒤 다음 값을 채웁니다.
-- 저장 직전에는 `storage_int_value_exists()`로 중복 PK를 확인합니다.
-- 아직 B+ Tree는 연결되지 않았기 때문에, 최대값 계산과 중복 검사는 CSV 선형 탐색으로 처리합니다.
+- 프로그램이 테이블을 처음 만질 때는 CSV를 읽어 메모리 B+ Tree를 재구성합니다.
+- `INSERT`에서 `id`가 빠지면 재구성된 런타임 상태의 `next_id`를 사용해 다음 값을 채웁니다.
+- 저장 직전에는 B+ Tree에서 같은 PK가 이미 있는지 먼저 확인합니다.
+- `WHERE id = 값`, `WHERE id > 값`, `WHERE id < 값`은 이 메모리 인덱스를 사용하고,
+  그 외 조건은 CSV 선형 탐색으로 처리합니다.
 
 ### 데이터 파일 (.csv)
 
@@ -654,6 +661,21 @@ mkdir -p /tmp/data
 - 프롬프트는 `sqlproc>` 형태로 표시됩니다.
 - `SELECT * FROM users;`처럼 한 줄씩 입력합니다.
 - `.exit`, `exit`, `quit` 중 하나를 입력하면 종료합니다.
+
+### 실행 (benchmark 모드)
+
+```bash
+mkdir -p /tmp/data
+./build/sqlproc \
+  --schema-dir examples/schemas \
+  --data-dir   /tmp/data \
+  --benchmark
+```
+
+- 시작하면 `>> 벤치마크를 위한 더미 데이터는 몇 개를 생성하시겠습니까? : ` 프롬프트가 뜹니다.
+- 입력한 개수만큼 `/tmp/data/benchmark/` 아래에 `schemas/`, `data/`, `sql/`을 만듭니다.
+- benchmark는 `pk_lookup.sql`, `non_pk_lookup.sql`을 같은 `run_sql_file()` 경로로 실행해 시간을 잽니다.
+- 표를 출력한 뒤에는 자동으로 `sqlproc>` interactive 프롬프트로 넘어갑니다.
 
 ### 스키마 파일 예시
 
