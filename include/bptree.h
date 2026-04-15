@@ -9,7 +9,7 @@
  * 저장합니다.
  */
 
-#define BPTREE_ORDER 4
+#define BPTREE_ORDER 100
 
 typedef struct BPlusTree BPlusTree;
 typedef int (*BptreeVisitFn)(int key, long offset, void *user_data);

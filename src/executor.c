@@ -172,7 +172,7 @@ static int create_table_state(const AppConfig *config,
     set_runtime_error(error, "테이블 상태 저장 공간이 부족합니다.", (SourceLocation){0, 0});
     return -1;
 }
-
+// AppConfig(경로파일), TableSchema(스키마 파일(파일구조)), ErroInfo
 static int get_table_state_index(const AppConfig *config,
                                  const TableSchema *schema,
                                  ErrorInfo *error)
