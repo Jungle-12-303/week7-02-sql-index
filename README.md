@@ -7,9 +7,10 @@
 | 항목      | 내용                                         |
 | --------- | -------------------------------------------- |
 | 목표      | SQL 실행 흐름을 초심자도 따라갈 수 있게 구현 |
-| 입력      | `.sql` 파일                                  |
+| 입력      | `.sql` 파일 또는 `--interactive`             |
 | 출력      | 표준 출력 + `.csv` 파일                      |
 | 지원 문장 | `INSERT`, `SELECT`                           |
+| PK 정책   | 스키마에 `id:int`가 있으면 자동 PK 관리      |
 | 저장 방식 | `CSV`                                        |
 | 스키마    | `<table>.schema`                             |
 
@@ -17,13 +18,13 @@
 
 ```mermaid
 flowchart LR
-    A["SQL File"] --> B["Tokenizer"]
+    A["SQL File / Interactive Input"] --> B["Tokenizer"]
     B --> C["Parser"]
     C --> D["Executor"]
-    D -->|"storage_append_row()"| E["storage.c"]
-    D -->|"storage_print_rows()"| E
-    E --> F["CSV File"]
+    D -->|"load_table_schema()"| E["schema.c"]
+    D -->|"storage_*()"| F["storage.c"]
     E --> G["Schema File"]
+    F --> H["CSV File"]
 ```
 
 ## 실행 흐름
@@ -40,10 +41,10 @@ flowchart LR
 | 단계 | 함수 / 파일 | 핵심 역할 |
 | --- | --- | --- |
 | 1 | `main.c` | 프로그램 진입점 |
-| 2 | `app.c` | SQL 파일 읽기, 전체 실행 제어 |
+| 2 | `app.c` | SQL 파일 읽기 또는 interactive 입력 처리 |
 | 3 | `tokenizer.c` | SQL 문자열을 토큰 배열로 분리 |
 | 4 | `parser.c` | 토큰 배열을 `SqlProgram`으로 변환 |
-| 5 | `executor.c` + `storage.c` + `schema.c` | 스키마 확인 후 출력/CSV 반영 |
+| 5 | `executor.c` + `storage.c` + `schema.c` | 스키마 확인, PK 검증, 출력/CSV 반영 |
 
 ### 단계별 예시 이미지
 
@@ -100,9 +101,10 @@ flowchart LR
 | `TokenList` | SQL 문자열을 잘라낸 토큰 배열 | `tokenizer.c` | `Token[]` |
 | `SqlProgram` | 파싱된 SQL 문장 목록 | `parser.c` | `Statement[]` |
 | `Statement` | `INSERT` / `SELECT` 구분 단위 | `parser.c` | `InsertStatement` or `SelectStatement` |
+| `AppConfig` | 실행 경로와 interactive 모드 설정 | `app.c` | `schema_dir`, `data_dir`, `input_path`, `interactive_mode` |
 | `InsertStatement` | 테이블명, 컬럼명[], 값[] | `parser.c` | `LiteralValue[]` |
 | `SelectStatement` | 테이블명, `select_all`, 컬럼명[] | `parser.c` | — |
-| `TableSchema` | 컬럼 순서·타입 정의 | `schema.c` | `ColumnSchema[]` |
+| `TableSchema` | 컬럼 순서·타입·PK 위치 정의 | `schema.c` | `ColumnSchema[]`, `primary_key_index` |
 | `ErrorInfo` | 오류 메시지 + 위치 | 전 단계 공용 | — |
 
 ### 구조체를 사용하는 이유
@@ -124,10 +126,21 @@ flowchart LR
 
 ```sql
 INSERT INTO users VALUES (1, 'kim', 20);
-INSERT INTO users (name, id, age) VALUES ('lee', 2, 30);
+INSERT INTO users (name, age) VALUES ('lee', 30);
 SELECT * FROM users;
 SELECT name, age FROM users;
 ```
+
+- 스키마에 `id:int` 컬럼이 있으면 PK로 인식하고, `INSERT`에서 `id`를 빼면 현재 최대값 + 1을 자동 부여합니다.
+- 이미 존재하는 `id`를 넣으면 `PK 값이 이미 존재합니다.` 오류로 거절합니다.
+- `WHERE`, `JOIN`, `UPDATE`, `DELETE` 등은 아직 지원하지 않습니다.
+
+## 실행 모드
+
+- 새 데이터 디렉터리를 쓸 때는 먼저 `mkdir -p /tmp/sqlproc-data`처럼 부모 디렉터리를 만들어 두어야 합니다.
+- 파일 모드: `./build/sqlproc --schema-dir ./examples/schemas --data-dir /tmp/sqlproc-data ./examples/demo.sql`
+- interactive 모드: `./build/sqlproc --schema-dir ./examples/schemas --data-dir /tmp/sqlproc-data --interactive`
+- interactive 모드에서는 `sqlproc>` 프롬프트에서 SQL 한 줄씩 입력하고 `.exit`로 종료합니다.
 
 ## 시연 예시
 
@@ -135,9 +148,9 @@ SELECT name, age FROM users;
 
 ```sql
 INSERT INTO users VALUES (1, 'kim', 20);
-INSERT INTO users (name, age, id) VALUES ('lee', 30, 2);
+INSERT INTO users (name, age) VALUES ('lee', 30);
 INSERT INTO users VALUES (3, 'park', 27);
-INSERT INTO users (age, id, name) VALUES (41, 4, 'choi');
+INSERT INTO users (age, name) VALUES (41, 'choi');
 INSERT INTO users VALUES (5, 'jung', 33);
 SELECT * FROM users;
 SELECT name, age FROM users;
@@ -157,6 +170,8 @@ SELECT age, id FROM users;
 | Parser    | `컬럼 수와 값 수가 일치하지 않습니다.` |
 | Executor  | `INSERT 값 타입이 스키마와 맞지 않습니다.` |
 | Executor  | `SELECT 대상 컬럼이 스키마에 없습니다.` |
+| Executor  | `PK 값이 이미 존재합니다.` |
+| Executor  | `문자열 값이 CSV에서 수식으로 해석될 수 없습니다.` |
 
 ```mermaid
 flowchart LR
@@ -178,6 +193,7 @@ flowchart LR
 | Storage | `데이터 파일을 만들 수 없습니다.` |
 | Storage | `기존 데이터 파일 헤더 형식이 잘못되었습니다.` |
 | Storage | `CSV 헤더가 스키마와 다릅니다.` |
+| Storage | `CSV 헤더 순서가 스키마와 다릅니다.` |
 | Storage | `CSV 행을 읽는 중 오류가 발생했습니다.` |
 
 ```mermaid
@@ -224,21 +240,29 @@ flowchart LR
 
 ### 5. executor와 storage를 분리해 역할을 명확히 구분
 
+- 스키마에 `id:int` 컬럼이 있으면 `schema.c`가 PK 위치를 기억합니다.
+- `INSERT`에서 `id`를 생략하면 `executor.c`가 기존 CSV의 최대 `id`를 읽어 다음 값을 채웁니다.
+- 저장 직전에는 같은 `id`가 이미 있는지 확인해 중복 PK를 막습니다.
+
 ```mermaid
 flowchart LR
     subgraph executor["executor.c — SQL 로직"]
         E1["타입·이름 검증"]
         E2["컬럼 순서 재배치"]
+        E3["PK 자동 발급·중복 검사"]
     end
     subgraph storage["storage.c — 파일 입출력"]
         S1["CSV 헤더 생성·검증"]
         S2["행 읽기·쓰기"]
+        S3["최대 PK / 중복 PK 확인"]
     end
-    executor -->|"두 함수로만 연결"| storage
+    executor -->|"storage 인터페이스 호출"| storage
 ```
 
 - `storage_append_row()` — INSERT 시 CSV에 한 행 추가
 - `storage_print_rows()` — SELECT 시 해당 컬럼만 출력
+- `storage_find_max_int_value()` — 자동 PK 발급용 최대값 계산
+- `storage_int_value_exists()` — PK 중복 여부 확인
 - storage.c를 교체해도 executor.c를 건드릴 필요가 없음
 
 ## 협업과 회고

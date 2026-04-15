@@ -23,7 +23,7 @@ C를 막 배운 사람이 이 프로젝트를 처음 읽을 때 참고하는 문
 
 ## 1. 프로젝트 한 줄 요약
 
-> **SQL 파일을 실행하면, CSV 파일에 데이터를 읽고 쓰는 미니 데이터베이스**
+> **SQL 파일이나 interactive 입력을 실행하면, CSV 파일에 데이터를 읽고 쓰는 미니 데이터베이스**
 
 지원하는 SQL:
 
@@ -33,6 +33,9 @@ INSERT INTO users (id, name, age) VALUES (1, 'kim', 20);
 
 -- 테이블에 행 삽입 (스키마 순서 그대로)
 INSERT INTO users VALUES (2, 'lee', 30);
+
+-- id:int PK 컬럼이 있으면 자동 PK 발급
+INSERT INTO users (name, age) VALUES ('choi', 35);
 
 -- 전체 조회
 SELECT * FROM users;
@@ -48,6 +51,10 @@ SELECT name, age FROM users;
 SELECT * FROM users WHERE age >= 20;   -- ✗
 ```
 
+- 스키마에 `id:int` 컬럼이 있으면 PK로 인식합니다.
+- `INSERT`에서 `id`를 빼면 현재 CSV의 최대 `id` + 1을 자동으로 넣습니다.
+- 같은 PK를 다시 넣으면 `PK 값이 이미 존재합니다.` 오류를 반환합니다.
+
 ---
 
 ## 2. 디렉토리 구조
@@ -58,18 +65,19 @@ week6-team5-sql/
 │   └── sqlproc.h       ← 모든 .c 파일이 공유하는 "공용 계약"
 ├── src/
 │   ├── main.c          ← 프로그램 시작점 (진입점)
-│   ├── app.c           ← 명령줄 인자 파싱, SQL 파일 실행
+│   ├── app.c           ← 명령줄 인자 파싱, 파일/interactive 실행
 │   ├── tokenizer.c     ← SQL 문자열 → 토큰 조각
 │   ├── parser.c        ← 토큰 → SQL 문장 구조체
 │   ├── schema.c        ← 테이블 스키마 파일 읽기
 │   ├── executor.c      ← SQL 검증 및 실행 흐름 제어
-│   └── storage.c       ← CSV 파일 경로·헤더·행 입출력
+│   └── storage.c       ← CSV 파일 경로·헤더·행 입출력, PK helper scan
 ├── tests/
 │   └── test_runner.c   ← 통합 테스트
 ├── examples/
 │   ├── schemas/
 │   │   └── users.schema
 │   ├── demo.sql
+│   ├── live.sql
 │   └── user_input.sql
 └── Makefile
 ```
@@ -90,12 +98,12 @@ tokenizer.c  parser.c  executor.c  storage.c ...  (실제 구현체)
 
 ```mermaid
 flowchart TD
-    A(["input.sql 파일"]) --> B["app.c\nSQL 파일 읽기"]
+    A(["input.sql 파일\n또는 interactive 입력"]) --> B["app.c\n입력 읽기와 실행 모드 분기"]
     B --> C["tokenizer.c\n문자열 → 토큰 배열"]
     C --> D["parser.c\n토큰 → SQL 문장 구조체"]
     D --> E["executor.c\nSQL 검증 및 실행 흐름 제어"]
     E --> F["schema.c\n스키마 파일 읽기"]
-    E -->|"storage_append_row()\nstorage_print_rows()"| H["storage.c\nCSV 파일 입출력"]
+    E -->|"storage_append_row()\nstorage_print_rows()\nPK helper"| H["storage.c\nCSV 파일 입출력"]
     H --> G[("CSV 파일\n데이터 저장/읽기")]
 
     style A fill:#e8f5e9
@@ -162,12 +170,12 @@ graph LR
 | 파일 | 주요 함수 | 한 줄 설명 |
 |------|-----------|------------|
 | `main.c` | `main()` | 인자 파싱 후 `run_program()` 호출 |
-| `app.c` | `parse_arguments()`, `run_program()` | 인자 검증, SQL 파일 읽기, 파이프라인 실행 |
+| `app.c` | `parse_arguments()`, `run_program()`, `load_sql_file()` | 인자 검증, 파일/interactive 모드 분기, 파이프라인 실행 |
 | `tokenizer.c` | `tokenize_sql()` | 문자열을 `TokenList`로 변환 |
 | `parser.c` | `parse_program()` | `TokenList`를 `SqlProgram`으로 변환 |
 | `schema.c` | `load_table_schema()` | `.schema` 파일 읽어 `TableSchema` 반환 |
-| `executor.c` | `execute_program()` | SQL 타입·이름 검증, storage.c 호출 |
-| `storage.c` | `storage_append_row()`, `storage_print_rows()` | CSV 경로·헤더·행 읽기/쓰기 |
+| `executor.c` | `execute_program()` | SQL 타입·이름 검증, PK 자동 발급·중복 검사, storage.c 호출 |
+| `storage.c` | `storage_append_row()`, `storage_print_rows()`, `storage_find_max_int_value()`, `storage_int_value_exists()` | CSV 경로·헤더·행 읽기/쓰기와 PK helper scan |
 
 ---
 
@@ -182,6 +190,9 @@ graph LR
 #define SQLPROC_MAX_VALUE_LEN 64   // 값 문자열 최대 63자
 #define SQLPROC_MAX_COLUMNS   16   // 한 테이블 최대 16개 컬럼
 #define SQLPROC_MAX_TOKENS   512   // SQL 한 문자열당 최대 토큰 수
+#define SQLPROC_MAX_STATEMENTS 32  // 한 SQL 입력당 최대 문장 수
+#define SQLPROC_MAX_ERROR_LEN 256  // 오류 메시지 최대 길이
+#define SQLPROC_MAX_SQL_SIZE 8192  // 파일/interactive 입력 최대 길이
 ```
 
 > C에서는 배열 크기를 미리 정해야 합니다.  
@@ -246,6 +257,7 @@ classDiagram
     class TableSchema {
         char table_name[64]
         int column_count
+        int primary_key_index
         ColumnSchema columns[16]
     }
     class ColumnSchema {
@@ -267,8 +279,11 @@ typedef struct {
     char schema_dir[256];  // --schema-dir 값
     char data_dir[256];    // --data-dir 값
     char input_path[256];  // SQL 파일 경로
+    int interactive_mode;  // 1이면 --interactive
 } AppConfig;
 ```
+
+`interactive_mode == 1`이면 `input_path` 대신 `stdin`에서 한 줄씩 읽습니다.
 
 ---
 
@@ -395,12 +410,14 @@ flowchart LR
     subgraph executor["executor.c — SQL 로직"]
         E1["타입·이름 검증"]
         E2["컬럼 순서 재배치"]
+        E3["PK 자동 발급·중복 검사"]
     end
     subgraph storage["storage.c — 파일 입출력"]
         S1["CSV 헤더 생성·검증"]
         S2["행 읽기·쓰기"]
+        S3["최대 PK / 중복 PK 확인"]
     end
-    executor -->|"storage_append_row()\nstorage_print_rows()"| storage
+    executor -->|"storage_append_row()\nstorage_print_rows()\nstorage_find_max_int_value()\nstorage_int_value_exists()"| storage
 ```
 
 **INSERT 실행 흐름:**
@@ -409,17 +426,18 @@ flowchart LR
 flowchart TD
     A["execute_insert()"] --> B["load_table_schema()\n스키마 파일 읽기"]
     B --> C["build_insert_row_values()\n구조체 값을 스키마 순서로 정렬"]
-    C --> D["storage_append_row()"]
+    C --> D["필요 시 PK 자동 발급\n중복 PK 검사"]
+    D --> E["storage_append_row()"]
 
     subgraph storage_detail["storage.c 내부"]
-        D --> E["ensure_data_file()\nCSV 없으면 헤더 생성, 있으면 헤더 검증"]
-        E --> F["fopen(path, 'ab')\n추가 모드로 열기"]
-        F --> G["write_csv_row()\nCSV 끝에 행 추가"]
+        E --> F["ensure_data_file()\nCSV 없으면 헤더 생성, 있으면 헤더 검증"]
+        F --> G["fopen(path, 'a+b')\n추가 모드로 열기"]
+        G --> H["write_csv_row()\nCSV 끝에 행 추가"]
     end
 ```
 
-> **"ab" 모드란?**  
-> `"a"` = append(추가), `"b"` = binary.  
+> **"a+b" 모드란?**  
+> `"a"` = append(추가), `"b"` = binary, `"+"` = 읽기와 쓰기 둘 다 허용.  
 > 파일 끝에 이어 쓰기 때문에 기존 데이터를 덮어쓰지 않습니다.
 
 **build_insert_row_values() 가 하는 일:**
@@ -433,7 +451,14 @@ INSERT INTO users VALUES (1, 'kim', 20);
 INSERT INTO users (age, name, id) VALUES (20, 'kim', 1);
 → row_values[0]="1"(id), row_values[1]="kim"(name), row_values[2]="20"(age)
 /* 스키마 순서(id, name, age)에 맞게 재정렬됩니다 */
+
+/* id:int PK 컬럼을 생략하면 자동으로 채움 */
+INSERT INTO users (name, age) VALUES ('lee', 30);
+→ 기존 최대 id가 5라면 row_values[0]="6", row_values[1]="lee", row_values[2]="30"
 ```
+
+- `schema->primary_key_index >= 0`이면 `id:int` 컬럼이 존재한다는 뜻입니다.
+- 이 경우 `execute_insert()`는 저장 전에 현재 최대 PK를 읽고, 같은 PK가 있는지도 한 번 더 확인합니다.
 
 **SELECT 실행 흐름:**
 
@@ -484,17 +509,26 @@ id:int,name:string,age:int
 - 형식: `컬럼명:타입`
 - 타입: `int` 또는 `string` 만 지원
 - 컬럼 순서가 CSV 헤더 순서가 됩니다
+- `id:int` 컬럼이 있으면 그 위치를 `primary_key_index`로 기록합니다
 
 ```c
 /* load_table_schema()가 반환하는 구조체 */
 TableSchema {
     table_name   = "users"
     column_count = 3
+    primary_key_index = 0
     columns[0]   = { name="id",   type=DATA_TYPE_INT    }
     columns[1]   = { name="name", type=DATA_TYPE_STRING }
     columns[2]   = { name="age",  type=DATA_TYPE_INT    }
 }
 ```
+
+### 현재 PK 정책
+
+- `id:int` 컬럼이 있으면 현재 구현에서는 그 컬럼을 PK처럼 다룹니다.
+- `INSERT`에서 `id`가 빠지면 `storage_find_max_int_value()`로 기존 최대값을 찾은 뒤 다음 값을 채웁니다.
+- 저장 직전에는 `storage_int_value_exists()`로 중복 PK를 확인합니다.
+- 아직 B+ Tree는 연결되지 않았기 때문에, 최대값 계산과 중복 검사는 CSV 선형 탐색으로 처리합니다.
 
 ### 데이터 파일 (.csv)
 
@@ -508,6 +542,7 @@ id,name,age
 - 첫 줄: 헤더 (스키마 순서와 반드시 일치해야 함)
 - 쉼표나 큰따옴표를 포함한 값은 `"..."` 로 감쌈
 - 내부 큰따옴표는 `""` 로 이스케이프
+- 문자열 값이 `=`, `+`, `-`, `@`로 시작하면 스프레드시트 수식 해석을 막기 위해 INSERT를 거절합니다
 
 ### CSV 파일이 자동으로 생성되는 시점
 
@@ -516,7 +551,7 @@ flowchart TD
     A["INSERT 실행"] --> B{"CSV 파일\n존재하는가?"}
     B -- 아니오 --> C["fopen('wb') 로 생성\n헤더 행 먼저 기록\n예: id,name,age"]
     B -- 예 --> D["fopen('rb') 로 열어\n헤더가 스키마와 일치하는지 검증"]
-    C --> E["fopen('ab') 로 열어\n데이터 행 추가"]
+    C --> E["fopen('a+b') 로 열어\n데이터 행 추가"]
     D --> E
 ```
 
@@ -589,6 +624,7 @@ make clean    # build/ 삭제
 ### 실행 (파일 모드)
 
 ```bash
+mkdir -p /tmp/data
 ./build/sqlproc \
   --schema-dir examples/schemas \
   --data-dir   /tmp/data \
@@ -603,6 +639,22 @@ make clean    # build/ 삭제
 | `--data-dir <dir>` | `.csv` 파일들이 저장되는 디렉터리 |
 | `<input.sql>` | 실행할 SQL 파일 경로 |
 
+`--data-dir`는 미리 존재해야 합니다. 현재 구현은 CSV 파일은 만들지만 부모 디렉터리까지 생성하지는 않습니다.
+
+### 실행 (interactive 모드)
+
+```bash
+mkdir -p /tmp/data
+./build/sqlproc \
+  --schema-dir examples/schemas \
+  --data-dir   /tmp/data \
+  --interactive
+```
+
+- 프롬프트는 `sqlproc>` 형태로 표시됩니다.
+- `SELECT * FROM users;`처럼 한 줄씩 입력합니다.
+- `.exit`, `exit`, `quit` 중 하나를 입력하면 종료합니다.
+
 ### 스키마 파일 예시
 
 ```
@@ -615,8 +667,8 @@ id:int,name:string,age:int
 ```sql
 -- examples/demo.sql
 INSERT INTO users VALUES (1, 'kim', 20);
-INSERT INTO users VALUES (2, 'lee', 30);
-INSERT INTO users VALUES (3, 'park', 40);
+INSERT INTO users (name, age) VALUES ('lee', 30);
+INSERT INTO users (age, name) VALUES (40, 'park');
 SELECT * FROM users;
 SELECT id, name FROM users;
 ```
@@ -648,8 +700,9 @@ id	name
 5. src/parser.c            ← parse_insert_statement(),
                               parse_select_statement() (25분)
 6. src/schema.c            ← load_table_schema() 함수 (15분)
-7. src/executor.c          ← execute_insert(), execute_select() (20분)
-8. src/storage.c           ← storage_append_row(), storage_print_rows() (20분)
+7. src/executor.c          ← execute_insert(), PK 자동 발급 흐름 (20분)
+8. src/storage.c           ← storage_append_row(), storage_print_rows(),
+                              storage_find_max_int_value() (20분)
 ```
 
 > executor.c와 storage.c는 함께 읽는 것을 권장합니다.  
