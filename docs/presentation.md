@@ -1,185 +1,169 @@
-# 7주차 발표: B+ Tree 인덱스 구현
+# B+ Tree 인덱스 구현
 
-> 발표 시간: 4분 내외 | 발표자 참고용
-
----
-
-## 슬라이드 1 — 이번 주 과제 한 줄 요약 (30초)
-
-> "WHERE id = ? 가 왜 빠른지, B+ Tree로 직접 보여줍니다."
-
-- 이전에 만든 C언어 SQL 처리기에 **B+ Tree 인덱스**를 붙였습니다.
-- PK(`id`) 조회: B+ Tree → CSV 한 줄만 읽기
-- 비-PK 조회: CSV 전체 선형 탐색
-- 100만 건 데이터로 속도 차이를 직접 측정했습니다.
+> `WHERE id = ?` 조회가 왜 빠른지 — 직접 만들어서 측정했습니다.
 
 ---
 
-## 슬라이드 2 — 전체 구조 (30초)
+## 이번 주 핵심 질문
+
+> **100만 건의 레코드에서 특정 id를 어떻게 빠르게 찾을 수 있을까?**
+
+CSV 파일에서 `id = 900000`을 찾으려면 원래는 처음부터 끝까지 읽어야 합니다.  
+이번 주는 그 문제를 **B+ Tree 인덱스**로 해결했습니다.
+
+---
+
+## 전체 구조
 
 ```mermaid
 flowchart LR
-    A["SQL 입력"] --> B["Tokenizer"]
-    B --> C["Parser"]
-    C --> D["Executor"]
-    D -->|"PK 조건"| E["B+ Tree\nbptree.c"]
-    D -->|"비-PK 조건"| F["CSV 선형 탐색\nstorage.c"]
-    E -->|"id → offset"| G["CSV 해당 row만 읽기"]
-    F --> G
+    A["SQL 입력"] --> B["Tokenizer → Parser"]
+    B --> C["Executor"]
+    C -->|"WHERE id = ?"| D["B+ Tree\nbptree.c"]
+    C -->|"WHERE name = ?"| E["CSV 선형 탐색\nstorage.c"]
+    D -->|"id → offset"| F["CSV 해당 row만 읽기"]
+    E --> F
 ```
 
-핵심은 **Executor 단에서 분기**가 일어난다는 점입니다.  
-`WHERE` 컬럼이 `id`이고 연산자가 `=`, `>`, `<`이면 B+ Tree,  
-그 외에는 기존 선형 탐색을 그대로 사용합니다.
+이전 주차에서 만든 SQL 처리기(`tokenizer → parser → executor`)를 그대로 사용하고,  
+**executor 단에서 PK 조건인지 아닌지를 판단해 경로를 나눕니다.**
 
 ---
 
-## 슬라이드 3 — B+ Tree가 저장하는 것 (45초)
+## B+ Tree는 무엇을 저장하나
 
-B+ Tree는 **데이터를 저장하지 않습니다.** 책갈피만 저장합니다.
+> **데이터를 저장하지 않습니다. 위치(offset)만 저장합니다.**
 
 ```mermaid
 flowchart LR
     A["id = 900000"] --> B["B+ Tree\nlookup"]
     B --> C["offset = 15382714"]
-    C --> D["users.csv\n15382714 바이트 위치로 이동"]
+    C --> D["users.csv\n15382714 바이트 위치로 이동\nfseek()"]
     D --> E["그 한 줄만 읽기"]
 ```
 
-| B+ Tree key | B+ Tree value |
+| B+ Tree에 저장되는 것 | 의미 |
 |---|---|
-| PK `id` 값 | CSV 파일의 row 시작 `offset` |
+| **key** | PK `id` 값 |
+| **value** | CSV 파일에서 해당 row가 시작되는 byte offset |
 
-- 실제 row는 CSV에만 있고, B+ Tree는 **위치 정보(offset)만** 들고 있습니다.
-- `ftell()`로 쓰기 직전 offset을 기록, `fseek()`으로 그 위치로 바로 이동합니다.
+실제 row 데이터(`1,kim,20`)는 CSV에만 있습니다.  
+B+ Tree는 "책 내용"이 아니라 **"책갈피"** 입니다.
 
 ---
 
-## 슬라이드 4 — B+ Tree 구조 (45초)
+## B+ Tree 구조
 
-이 구현은 **Order 4** B+ Tree입니다.
+이 구현은 **Order 4** — leaf 하나에 key 최대 3개, 자식 최대 4개.
 
 ```mermaid
 flowchart TD
-    Root["Internal Node\n[4, 7]"]
-    L1["Leaf\n[1,2,3]"]
-    L2["Leaf\n[4,5,6]"]
-    L3["Leaf\n[7,8,9]"]
+    Root["internal root\nkeys: [4 | 7]"]
+    L1["leaf\nkeys: [1 | 2 | 3]\noffsets: [16 | 32 | 48]"]
+    L2["leaf\nkeys: [4 | 5 | 6]\noffsets: [64 | 80 | 96]"]
+    L3["leaf\nkeys: [7 | 8 | 9]\noffsets: [112 | 128 | 144]"]
 
-    Root --> L1
-    Root --> L2
-    Root --> L3
-    L1 -- "next →" --> L2
-    L2 -- "next →" --> L3
+    Root -- "id < 4" --> L1
+    Root -- "4 ≤ id < 7" --> L2
+    Root -- "id ≥ 7" --> L3
+
+    L1 -. "next →" .-> L2
+    L2 -. "next →" .-> L3
 ```
 
-- **Internal node**: 탐색 방향을 가리키는 key만 저장
-- **Leaf node**: 실제 `id → offset` 페어 저장 + 연결 리스트로 연결
-- **Leaf 연결 리스트** 덕분에 범위 조회(`id > ?`, `id < ?`)도 효율적으로 처리
+- **internal node**: 어느 자식으로 내려갈지 안내하는 경계값만 저장
+- **leaf node**: 실제 `id → offset` 쌍 저장
+- **leaf의 `next` 포인터**: 범위 조회(`id > ?`, `id < ?`)를 위해 leaf를 연결 리스트로 연결
 
 ---
 
-## 슬라이드 5 — INSERT가 인덱스를 유지하는 방식 (30초)
+## INSERT가 인덱스를 유지하는 방법
 
 ```mermaid
 flowchart LR
     A["INSERT INTO users\n(name, age) VALUES\n('kim', 20)"] --> B["max id + 1\n자동 부여"]
-    B --> C["ftell()로\nrow 시작 offset 기록"]
+    B --> C["ftell()\nrow 시작 offset 기록"]
     C --> D["CSV에 append"]
-    C --> E["B+ Tree에\nid → offset 등록"]
+    C --> E["bptree_insert()\nid → offset 등록"]
 ```
 
-- `id`를 생략하면 현재 최대 PK + 1이 자동 부여됩니다.
-- CSV 저장과 B+ Tree 등록이 **항상 동시에** 이루어집니다.
-- 프로그램을 재시작하면 CSV를 처음부터 스캔해 B+ Tree를 **메모리에 재구성**합니다.
+- `id`를 생략하면 현재 최대 PK + 1을 자동으로 계산합니다.
+- CSV에 row를 쓰기 **직전** `ftell()`로 위치를 확보한 뒤 B+ Tree에 등록합니다.
+- **프로그램 재시작** 시: CSV를 처음부터 스캔해 메모리 B+ Tree를 자동 재구성합니다.
 
 ---
 
-## 슬라이드 6 — 실제 조회 분기 (30초)
+## 조회 분기
 
 ```mermaid
 flowchart TD
     A["SELECT ... WHERE ..."] --> B{"WHERE 컬럼이 id?"}
-    B -->|"Yes"| C{"연산자가\n=, >, < ?"}
-    C -->|"= "| D["[INDEX]\nB+ Tree exact search\n→ 1개 offset → 1 row"]
-    C -->|"> or <"| E["[INDEX-RANGE]\nleaf 연결 리스트 순회\n→ 여러 offset → N rows"]
+    B -->|"Yes"| C{"연산자?"}
+    C -->|"="| D["[INDEX]\nB+ Tree exact search\n→ offset 1개 → row 1개"]
+    C -->|"&gt; 또는 &lt;"| E["[INDEX-RANGE]\nleaf next 연결 순회\n→ 범위 내 모든 row"]
     C -->|"!="| F["[SCAN]\nCSV 전체 선형 탐색"]
     B -->|"No"| F
 ```
 
-| 쿼리 | 로그 | 경로 |
+| 쿼리 | 실행 로그 | 경로 |
 |---|---|---|
-| `WHERE id = 900000` | `[INDEX]` | B+ Tree → 1 row |
-| `WHERE id > 999990` | `[INDEX-RANGE]` | leaf 연결 순회 |
-| `WHERE name = 'kim'` | `[SCAN]` | CSV 전체 탐색 |
-| `WHERE age != 20` | `[SCAN]` | CSV 전체 탐색 |
+| `WHERE id = 900000` | `[INDEX]` | B+ Tree → offset 1개 → row 1개 |
+| `WHERE id > 999990` | `[INDEX-RANGE]` | leaf 연결 리스트 순회 |
+| `WHERE name = 'user900000'` | `[SCAN]` | CSV 처음부터 끝까지 |
+| `WHERE age != 20` | `[SCAN]` | CSV 처음부터 끝까지 |
 
 ---
 
-## 슬라이드 7 — 성능 비교 결과 (30초)
+## 성능 비교
 
-100만 건 기준 측정 결과:
+> **100만 건 기준 측정 (`./build/bench_index 1000000`)**
 
-| 조회 방식 | 쿼리 예시 | 소요 시간 |
+| 조회 방식 | 쿼리 | 소요 시간 |
 |---|---|---|
 | **B+ Tree 인덱스** | `WHERE id = 900000` | **0.002 ms** |
-| **CSV 선형 탐색** | `WHERE name = 'user900000'` | **86 ms** |
-
-> 약 **43,000배** 차이
+| **CSV 선형 탐색** | `WHERE name = 'user900000'` | **86.038 ms** |
 
 ```mermaid
-xychart-beta
-    title "조회 시간 비교 (ms, 1,000,000 레코드)"
-    x-axis ["B+ Tree (id = 900000)", "선형 탐색 (name = 'user900000')"]
-    y-axis "소요 시간 (ms)" 0 --> 90
-    bar [0.002, 86.038]
+block-beta
+  columns 3
+  A["B+ Tree\n(id = 900000)\n0.002 ms"]:1
+  space:1
+  B["선형 탐색\n(name = 'user900000')\n86.038 ms"]:1
 ```
 
----
-
-## 슬라이드 8 — 우리 팀의 차별점 (20초)
-
-1. **범위 조회 추가 구현** — `WHERE id > ?`, `WHERE id < ?`도 B+ Tree leaf 연결을 활용
-2. **인덱스 자동 재구성** — 프로그램 재시작 후 첫 접근 시 CSV 스캔으로 B+ Tree rebuild
-3. **독립 벤치마크 도구** — `bench_index`로 parser/executor 없이 순수 인덱스 성능만 측정 가능
-4. **단계별 오류 분리** — Tokenizer / Parser / Executor / Storage 레이어별 오류 메시지
+약 **43,000배** 차이.  
+같은 row를 찾는 쿼리인데, 어떤 경로를 타느냐에 따라 결과가 달라집니다.
 
 ---
 
-## 데모 순서 (실제 시연 시)
+## 우리 팀의 추가 구현
+
+| 항목 | 내용 |
+|---|---|
+| **범위 조회** | `WHERE id > ?`, `WHERE id < ?` — leaf `next` 포인터를 따라 처리 |
+| **인덱스 자동 재구성** | 재시작 후 첫 접근 시 CSV 스캔으로 B+ Tree rebuild |
+| **독립 벤치마크** | `bench_index` — parser/executor 없이 인덱스 성능만 순수 측정 |
+| **레이어별 오류 분리** | Tokenizer / Parser / Executor / Storage 단계별 오류 메시지 |
+
+---
+
+## 데모
 
 ```bash
-# 1. 빌드
+# 빌드
 make
 
-# 2. 인덱스 데모 (INSERT + SELECT 흐름 확인)
+# INSERT + SELECT 흐름 확인 ([INDEX] / [SCAN] 로그 출력)
 rm -rf demo-data && mkdir demo-data
 ./build/sqlproc --schema-dir ./examples/schemas \
                 --data-dir ./demo-data \
                 ./examples/index_demo.sql
 
-# 3. 성능 비교 (elapsed: ... ms 출력)
+# elapsed 비교 (PK vs 비-PK)
 ./build/sqlproc --schema-dir ./examples/schemas \
                 --data-dir ./demo-data \
                 ./examples/perf_compare.sql
 
-# 4. 순수 벤치마크 (100만 건)
+# 순수 벤치마크 (100만 건)
 ./build/bench_index 1000000
 ```
-
-**포인트**: 3번에서 `[INDEX]`와 `[SCAN]` 로그가 각각 찍히는 것을 보여주세요.
-
----
-
-## 발표 흐름 타임라인
-
-| 시간 | 내용 |
-|---|---|
-| 0:00 – 0:30 | 슬라이드 1: 과제 한 줄 요약 |
-| 0:30 – 1:00 | 슬라이드 2: 전체 구조 |
-| 1:00 – 1:45 | 슬라이드 3–4: B+ Tree가 뭘 저장하나 / 트리 구조 |
-| 1:45 – 2:15 | 슬라이드 5: INSERT 흐름 |
-| 2:15 – 2:45 | 슬라이드 6: 조회 분기 |
-| 2:45 – 3:15 | 슬라이드 7: 성능 숫자 |
-| 3:15 – 3:35 | 슬라이드 8: 차별점 |
-| 3:35 – 4:00 | 데모 또는 Q&A |
