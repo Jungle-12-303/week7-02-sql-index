@@ -12,10 +12,19 @@
 #define BPTREE_ORDER 4
 
 typedef struct BPlusTree BPlusTree;
+typedef int (*BptreeVisitFn)(int key, long offset, void *user_data);
 
 BPlusTree *bptree_create(void);
 void bptree_destroy(BPlusTree *tree);
 int bptree_insert(BPlusTree *tree, int key, long offset);
 int bptree_search(const BPlusTree *tree, int key, long *out_offset);
+int bptree_visit_greater_than(const BPlusTree *tree,
+                              int key,
+                              BptreeVisitFn visit,
+                              void *user_data);
+int bptree_visit_less_than(const BPlusTree *tree,
+                           int key,
+                           BptreeVisitFn visit,
+                           void *user_data);
 
 #endif

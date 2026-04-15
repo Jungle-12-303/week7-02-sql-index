@@ -131,6 +131,8 @@ SELECT * FROM users;
 SELECT name, age FROM users;
 SELECT * FROM users WHERE id = 1;
 SELECT name FROM users WHERE name = 'kim';
+SELECT * FROM users WHERE id > 999990;
+SELECT id, name FROM users WHERE age != 20;
 ```
 
 ## 7주차: B+ Tree 인덱스
@@ -149,7 +151,9 @@ flowchart LR
 - CSV에 row를 쓰기 직전 `ftell()`로 row 시작 위치를 얻고, B+ Tree에는 `id -> CSV offset`만 저장합니다.
 - 프로그램 실행 중 테이블을 처음 사용할 때 기존 CSV를 스캔해 메모리 B+ Tree를 재구성합니다.
 - `SELECT * FROM users WHERE id = 2;`는 `[INDEX]` 로그를 출력하고 B+ Tree로 row offset을 찾습니다.
+- `SELECT * FROM users WHERE id > 999990;`와 `id < ...`는 `[INDEX-RANGE]` 로그를 출력하고 B+ Tree leaf 연결을 따라 범위 결과를 찾습니다.
 - `SELECT * FROM users WHERE name = 'kim';`처럼 PK가 아닌 컬럼 조건은 `[SCAN]` 로그를 출력하고 CSV를 선형 탐색합니다.
+- `!=` 조건은 인덱스 범위가 아니므로 `[SCAN]`으로 처리합니다.
 
 ### 인덱스 데모
 
@@ -185,6 +189,8 @@ make seed-demo-data
 
 ```sql
 SELECT * FROM users WHERE id = 900000;
+SELECT * FROM users WHERE id > 999990;
+SELECT id, name FROM users WHERE age != 20;
 SELECT name, age FROM users WHERE name = 'user900000';
 ```
 

@@ -525,6 +525,15 @@ static int resolve_where_column(const TableSchema *schema,
         return 0;
     }
 
+    if (schema->columns[*where_column_index].type == DATA_TYPE_STRING &&
+        (statement->where_operator == WHERE_OP_GREATER ||
+         statement->where_operator == WHERE_OP_LESS)) {
+        set_runtime_error(error,
+                          "문자열 컬럼은 >, < 조건을 사용할 수 없습니다.",
+                          statement->where_value.location);
+        return 0;
+    }
+
     return 1;
 }
 
@@ -583,6 +592,114 @@ static int execute_select_with_index(const AppConfig *config,
                                        error);
 }
 
+typedef struct {
+    long *offsets;
+    int count;
+    int capacity;
+} OffsetList;
+
+static int append_offset(int key, long offset, void *user_data)
+{
+    OffsetList *list;
+    long *next_offsets;
+    int next_capacity;
+
+    (void)key;
+    list = (OffsetList *)user_data;
+
+    if (list->count == list->capacity) {
+        next_capacity = list->capacity == 0 ? 16 : list->capacity * 2;
+        next_offsets = (long *)realloc(list->offsets, sizeof(long) * (size_t)next_capacity);
+        if (next_offsets == NULL) {
+            return 0;
+        }
+
+        list->offsets = next_offsets;
+        list->capacity = next_capacity;
+    }
+
+    list->offsets[list->count] = offset;
+    list->count += 1;
+    return 1;
+}
+
+static const char *where_operator_text(WhereOperator where_operator)
+{
+    if (where_operator == WHERE_OP_EQUAL) {
+        return "=";
+    }
+
+    if (where_operator == WHERE_OP_GREATER) {
+        return ">";
+    }
+
+    if (where_operator == WHERE_OP_LESS) {
+        return "<";
+    }
+
+    return "!=";
+}
+
+static int execute_select_with_index_range(const AppConfig *config,
+                                           const TableSchema *schema,
+                                           const SelectStatement *statement,
+                                           const int selected_indices[SQLPROC_MAX_COLUMNS],
+                                           int selected_count,
+                                           ErrorInfo *error)
+{
+    OffsetList offsets;
+    int state_index;
+    int target_id;
+    int ok;
+
+    if (!parse_where_int_value(&statement->where_value, &target_id)) {
+        set_runtime_error(error,
+                          "정수 값이 int 범위를 벗어났습니다.",
+                          statement->where_value.location);
+        return 0;
+    }
+
+    state_index = get_table_state_index(config, schema, error);
+    if (state_index < 0) {
+        return 0;
+    }
+
+    memset(&offsets, 0, sizeof(offsets));
+    if (statement->where_operator == WHERE_OP_GREATER) {
+        ok = bptree_visit_greater_than(table_states[state_index].pk_index,
+                                       target_id,
+                                       append_offset,
+                                       &offsets);
+    } else {
+        ok = bptree_visit_less_than(table_states[state_index].pk_index,
+                                    target_id,
+                                    append_offset,
+                                    &offsets);
+    }
+
+    if (!ok) {
+        free(offsets.offsets);
+        set_runtime_error(error, "PK 인덱스 range scan 중 오류가 발생했습니다.", (SourceLocation){0, 0});
+        return 0;
+    }
+
+    printf("[INDEX-RANGE] WHERE %s %s %s (%d rows)\n",
+           statement->where_column,
+           where_operator_text(statement->where_operator),
+           statement->where_value.text,
+           offsets.count);
+
+    ok = storage_print_rows_at_offsets(config,
+                                       schema,
+                                       offsets.offsets,
+                                       offsets.count,
+                                       selected_indices,
+                                       selected_count,
+                                       error);
+    free(offsets.offsets);
+    return ok;
+}
+
 static int execute_select_with_scan(const AppConfig *config,
                                     const TableSchema *schema,
                                     const SelectStatement *statement,
@@ -591,8 +708,9 @@ static int execute_select_with_scan(const AppConfig *config,
                                     int where_column_index,
                                     ErrorInfo *error)
 {
-    printf("[SCAN] WHERE %s = %s\n",
+    printf("[SCAN] WHERE %s %s %s\n",
            statement->where_column,
+           where_operator_text(statement->where_operator),
            statement->where_value.text);
 
     return storage_print_rows_where_equals(config,
@@ -600,6 +718,7 @@ static int execute_select_with_scan(const AppConfig *config,
                                            selected_indices,
                                            selected_count,
                                            where_column_index,
+                                           statement->where_operator,
                                            &statement->where_value,
                                            error);
 }
@@ -640,13 +759,27 @@ static int execute_select(const AppConfig *config,
 
     if (schema.primary_key_index >= 0 &&
         where_column_index == schema.primary_key_index &&
-        statement->where_value.type == LITERAL_INT) {
+        statement->where_value.type == LITERAL_INT &&
+        statement->where_operator == WHERE_OP_EQUAL) {
         return execute_select_with_index(config,
                                          &schema,
                                          statement,
                                          selected_indices,
                                          selected_count,
                                          error);
+    }
+
+    if (schema.primary_key_index >= 0 &&
+        where_column_index == schema.primary_key_index &&
+        statement->where_value.type == LITERAL_INT &&
+        (statement->where_operator == WHERE_OP_GREATER ||
+         statement->where_operator == WHERE_OP_LESS)) {
+        return execute_select_with_index_range(config,
+                                               &schema,
+                                               statement,
+                                               selected_indices,
+                                               selected_count,
+                                               error);
     }
 
     return execute_select_with_scan(config,

@@ -40,6 +40,9 @@ typedef enum {
     TOKEN_RPAREN,
     TOKEN_STAR,
     TOKEN_EQUAL,
+    TOKEN_GREATER,
+    TOKEN_LESS,
+    TOKEN_BANG_EQUAL,
     TOKEN_KEYWORD_INSERT,
     TOKEN_KEYWORD_INTO,
     TOKEN_KEYWORD_VALUES,
@@ -59,6 +62,13 @@ typedef enum {
     LITERAL_INT,
     LITERAL_STRING
 } LiteralType;
+
+typedef enum {
+    WHERE_OP_EQUAL,
+    WHERE_OP_GREATER,
+    WHERE_OP_LESS,
+    WHERE_OP_NOT_EQUAL
+} WhereOperator;
 
 /* 파서/실행기 오류가 발생한 SQL 상의 위치입니다. */
 typedef struct {
@@ -143,6 +153,7 @@ typedef struct {
     int has_where;
     char where_column[SQLPROC_MAX_NAME_LEN];
     SourceLocation where_column_location;
+    WhereOperator where_operator;
     LiteralValue where_value;
 } SelectStatement;
 
@@ -200,8 +211,16 @@ int storage_print_rows_where_equals(const AppConfig *config,
                                     const int selected_indices[SQLPROC_MAX_COLUMNS],
                                     int selected_count,
                                     int where_column_index,
+                                    WhereOperator where_operator,
                                     const LiteralValue *where_value,
                                     ErrorInfo *error);
+int storage_print_rows_at_offsets(const AppConfig *config,
+                                  const TableSchema *schema,
+                                  const long offsets[],
+                                  int offset_count,
+                                  const int selected_indices[SQLPROC_MAX_COLUMNS],
+                                  int selected_count,
+                                  ErrorInfo *error);
 int storage_find_max_int_value(const AppConfig *config,
                                const TableSchema *schema,
                                int column_index,

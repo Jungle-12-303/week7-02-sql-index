@@ -132,6 +132,38 @@ static int parse_literal(ParserState *state, LiteralValue *value, ErrorInfo *err
     return 0;
 }
 
+static int parse_where_operator(ParserState *state,
+                                WhereOperator *where_operator,
+                                ErrorInfo *error)
+{
+    if (token_matches(state, TOKEN_EQUAL)) {
+        *where_operator = WHERE_OP_EQUAL;
+        advance_token(state);
+        return 1;
+    }
+
+    if (token_matches(state, TOKEN_GREATER)) {
+        *where_operator = WHERE_OP_GREATER;
+        advance_token(state);
+        return 1;
+    }
+
+    if (token_matches(state, TOKEN_LESS)) {
+        *where_operator = WHERE_OP_LESS;
+        advance_token(state);
+        return 1;
+    }
+
+    if (token_matches(state, TOKEN_BANG_EQUAL)) {
+        *where_operator = WHERE_OP_NOT_EQUAL;
+        advance_token(state);
+        return 1;
+    }
+
+    set_error(error, current_token(state), "WHERE 연산자는 =, >, <, != 중 하나여야 합니다.");
+    return 0;
+}
+
 static int parse_value_list(ParserState *state,
                             LiteralValue values[SQLPROC_MAX_COLUMNS],
                             int *value_count,
@@ -330,7 +362,7 @@ static int parse_select_statement(ParserState *state, Statement *statement, Erro
             return 0;
         }
 
-        if (!consume_token(state, TOKEN_EQUAL, error, "= 연산자가 필요합니다.")) {
+        if (!parse_where_operator(state, &select_statement->where_operator, error)) {
             return 0;
         }
 

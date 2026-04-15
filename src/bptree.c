@@ -373,3 +373,104 @@ int bptree_search(const BPlusTree *tree, int key, long *out_offset)
 
     return 1;
 }
+
+static const BPlusTreeNode *leftmost_leaf(const BPlusTree *tree)
+{
+    const BPlusTreeNode *node;
+
+    if (tree == NULL || tree->root == NULL) {
+        return NULL;
+    }
+
+    node = tree->root;
+    while (!node->is_leaf) {
+        node = node->children[0];
+    }
+
+    return node;
+}
+
+static const BPlusTreeNode *find_leaf(const BPlusTree *tree, int key)
+{
+    const BPlusTreeNode *node;
+    int position;
+
+    if (tree == NULL || tree->root == NULL) {
+        return NULL;
+    }
+
+    node = tree->root;
+    while (!node->is_leaf) {
+        position = find_child_position(node, key);
+        node = node->children[position];
+    }
+
+    return node;
+}
+
+int bptree_visit_greater_than(const BPlusTree *tree,
+                              int key,
+                              BptreeVisitFn visit,
+                              void *user_data)
+{
+    const BPlusTreeNode *node;
+    int position;
+    int i;
+
+    if (visit == NULL) {
+        return 0;
+    }
+
+    node = find_leaf(tree, key);
+    if (node == NULL) {
+        return 1;
+    }
+
+    position = find_leaf_position(node, key);
+    while (position < node->key_count && node->keys[position] <= key) {
+        position += 1;
+    }
+
+    while (node != NULL) {
+        for (i = position; i < node->key_count; i++) {
+            if (!visit(node->keys[i], node->offsets[i], user_data)) {
+                return 0;
+            }
+        }
+
+        node = node->next;
+        position = 0;
+    }
+
+    return 1;
+}
+
+int bptree_visit_less_than(const BPlusTree *tree,
+                           int key,
+                           BptreeVisitFn visit,
+                           void *user_data)
+{
+    const BPlusTreeNode *node;
+    int i;
+
+    if (visit == NULL) {
+        return 0;
+    }
+
+    node = leftmost_leaf(tree);
+    while (node != NULL) {
+        for (i = 0; i < node->key_count; i++) {
+            if (node->keys[i] >= key) {
+                return 1;
+            }
+
+            if (!visit(node->keys[i], node->offsets[i], user_data)) {
+                return 0;
+            }
+        }
+
+        node = node->next;
+    }
+
+    return 1;
+}

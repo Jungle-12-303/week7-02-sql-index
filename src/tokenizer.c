@@ -211,7 +211,7 @@ static int read_symbol(const char *sql_text,
 
     /*
      * 기호 토큰을 읽습니다.
-     * 지원 기호: , ; ( ) * =
+     * 지원 기호: , ; ( ) * = > < !=
      */
     text[0] = sql_text[*index];
     text[1] = '\0';
@@ -244,6 +244,21 @@ static int read_symbol(const char *sql_text,
     if (sql_text[*index] == '=') {
         *index += 1;
         return append_token(tokens, TOKEN_EQUAL, text, line, column, error);
+    }
+
+    if (sql_text[*index] == '>') {
+        *index += 1;
+        return append_token(tokens, TOKEN_GREATER, text, line, column, error);
+    }
+
+    if (sql_text[*index] == '<') {
+        *index += 1;
+        return append_token(tokens, TOKEN_LESS, text, line, column, error);
+    }
+
+    if (sql_text[*index] == '!' && sql_text[*index + 1] == '=') {
+        *index += 2;
+        return append_token(tokens, TOKEN_BANG_EQUAL, "!=", line, column, error);
     }
 
     set_error(error, "지원하지 않는 문자를 찾았습니다.", line, column);

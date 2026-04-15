@@ -237,6 +237,21 @@ static int test_parse_select_where_equals(void)
     return strcmp(program.items[0].select_statement.where_value.text, "7") == 0;
 }
 
+static int test_parse_select_where_greater(void)
+{
+    SqlProgram program;
+    ErrorInfo error;
+
+    if (!parse_sql_text("SELECT * FROM users WHERE id > 10;", &program, &error)) {
+        return 0;
+    }
+
+    return program.items[0].select_statement.has_where &&
+           program.items[0].select_statement.where_operator == WHERE_OP_GREATER &&
+           strcmp(program.items[0].select_statement.where_column, "id") == 0 &&
+           strcmp(program.items[0].select_statement.where_value.text, "10") == 0;
+}
+
 static int test_run_program_success(void)
 {
     AppConfig config;
@@ -1112,6 +1127,61 @@ static int test_select_where_index_and_scan_success(void)
            file_contains_text(output_path, "name\nkim\n");
 }
 
+static int test_select_where_comparison_operators(void)
+{
+    AppConfig config;
+    char base_dir[256];
+    char schema_dir[256];
+    char data_dir[256];
+    char schema_path[512];
+    char sql_path[256];
+    char output_path[512];
+
+    if (!create_temp_workspace(base_dir,
+                               sizeof(base_dir),
+                               schema_dir,
+                               sizeof(schema_dir),
+                               data_dir,
+                               sizeof(data_dir),
+                               "sqlproc_where_comparison_")) {
+        return 0;
+    }
+
+    snprintf(schema_path, sizeof(schema_path), "%s/users.schema", schema_dir);
+    snprintf(sql_path, sizeof(sql_path), "%s/input.sql", base_dir);
+    snprintf(output_path, sizeof(output_path), "%s/output.txt", base_dir);
+
+    if (!write_text_file(schema_path, "id:int,name:string,age:int\n")) {
+        return 0;
+    }
+
+    if (!write_text_file(sql_path,
+                         "INSERT INTO users (name, age) VALUES ('kim', 20);"
+                         "INSERT INTO users (name, age) VALUES ('lee', 30);"
+                         "INSERT INTO users (name, age) VALUES ('park', 40);"
+                         "SELECT * FROM users WHERE id > 2;"
+                         "SELECT name FROM users WHERE id < 3;"
+                         "SELECT id, name FROM users WHERE age != 20;")) {
+        return 0;
+    }
+
+    memset(&config, 0, sizeof(config));
+    snprintf(config.schema_dir, sizeof(config.schema_dir), "%s", schema_dir);
+    snprintf(config.data_dir, sizeof(config.data_dir), "%s", data_dir);
+    snprintf(config.input_path, sizeof(config.input_path), "%s", sql_path);
+
+    if (!capture_run_program(&config, output_path)) {
+        return 0;
+    }
+
+    return file_contains_text(output_path, "[INDEX-RANGE] WHERE id > 2 (1 rows)\n") &&
+           file_contains_text(output_path, "id\tname\tage\n3\tpark\t40\n") &&
+           file_contains_text(output_path, "[INDEX-RANGE] WHERE id < 3 (2 rows)\n") &&
+           file_contains_text(output_path, "name\nkim\nlee\n") &&
+           file_contains_text(output_path, "[SCAN] WHERE age != 20\n") &&
+           file_contains_text(output_path, "id\tname\n2\tlee\n3\tpark\n");
+}
+
 static int test_select_where_id_type_error(void)
 {
     AppConfig config;
@@ -1332,6 +1402,11 @@ int main(void)
         return 1;
     }
 
+    if (!test_parse_select_where_greater()) {
+        fprintf(stderr, "test_parse_select_where_greater failed\n");
+        return 1;
+    }
+
     if (!test_bptree_single_key_search()) {
         fprintf(stderr, "test_bptree_single_key_search failed\n");
         return 1;
@@ -1414,6 +1489,11 @@ int main(void)
 
     if (!test_select_where_index_and_scan_success()) {
         fprintf(stderr, "test_select_where_index_and_scan_success failed\n");
+        return 1;
+    }
+
+    if (!test_select_where_comparison_operators()) {
+        fprintf(stderr, "test_select_where_comparison_operators failed\n");
         return 1;
     }
 
