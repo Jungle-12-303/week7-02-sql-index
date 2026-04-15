@@ -1,473 +1,162 @@
-# `week6-team5-sql`
+# 7주차 B+ Tree 인덱스 발표 자료
 
-> `WHERE id = ?` 조회가 왜 빠른지 B+ Tree 인덱스로 보여주는 교육용 SQL 처리기
+## 목표
 
-## 한눈에 보기
+본 프로젝트는 기존 CSV 기반 SQL 처리기에 메모리 기반 B+ Tree 인덱스를 연동한 구현입니다.  
+목표는 `WHERE id = ?`처럼 PK를 기준으로 한 조회에서 선형 탐색 대신 B+ Tree 인덱스를 사용하도록 만드는 것입니다.  
+스키마에 `id:int` 컬럼이 있으면 이를 PK로 간주하고, B+ Tree에는 row 전체가 아니라 `id -> CSV row offset`만 저장합니다.
 
-| 항목 | 내용 |
+```text
+key   = id
+value = CSV 파일에서 해당 row가 시작되는 위치
+```
+
+즉 CSV는 실제 데이터를 보관하고, B+ Tree는 그 데이터로 빠르게 찾아가기 위한 주소록 역할을 합니다.
+
+---
+
+## 1. 요구사항 대응 요약
+
+| 요구사항 | 구현 내용 |
 | --- | --- |
-| 목표 | PK 조회 시 B+ Tree 인덱스를 사용하는 흐름을 눈에 보이게 구현 |
-| 이번 주 핵심 | `WHERE id = ?`는 B+ Tree, 그 외 조건은 CSV 선형 탐색 |
-| 입력 | `.sql` 파일 또는 `--interactive` |
-| 출력 | 표준 출력 + `.csv` 파일 |
-| 지원 문장 | `INSERT`, `SELECT` |
-| 지원 WHERE | 단일 조건 `=`, `>`, `<`, `!=` |
-| PK 정책 | 스키마에 `id:int`가 있으면 자동 PK 관리 |
-| 인덱스 값 | `id -> CSV row offset` |
-| 저장 방식 | `CSV` |
-| 스키마 | `<table>.schema` |
+| 자동 ID 부여 | `id`가 빠진 INSERT는 현재 최대 id 다음 값을 자동으로 채웁니다. |
+| B+ Tree 인덱스 등록 | CSV 저장 후 `id -> row offset`을 B+ Tree에 등록합니다. |
+| ID 기준 SELECT | `WHERE id = ?`는 `[INDEX]` 경로로 처리합니다. |
+| 다른 필드 SELECT | `WHERE name`, `WHERE age`, `id != ?`는 `[SCAN]` 경로로 처리합니다. |
+| 대용량 테스트 | `make seed-demo-data RECORDS=1000000`로 100만 건 CSV를 생성합니다. |
 
-## 시스템 구조
+---
+
+## 2. 전체 구조
+
+기존 SQL 처리기의 흐름은 유지하고, 실행 단계에서만 B+ Tree와 CSV 스토리지를 함께 사용합니다.  
+즉 파서까지는 SQL을 구조체로 바꾸는 역할이고, `executor.c`에서 인덱스를 사용할지 선형 탐색을 할지 결정합니다.
 
 ```mermaid
 flowchart LR
-    A["SQL File / Interactive Input"] --> B["Tokenizer"]
-    B --> C["Parser"]
-    C --> D["Executor"]
-    D -->|"load_table_schema()"| E["schema.c"]
-    D -->|"storage_*()"| F["storage.c"]
-    D -->|"bptree_*()"| G["B+ Tree Index"]
-    E --> H["Schema File"]
-    F --> I["CSV File"]
-    I -. "first table access rebuild" .-> G
-    G -. "id -> row offset" .-> F
+    A["SQL 입력"] --> B["tokenizer.c<br/>토큰 생성"]
+    B --> C["parser.c<br/>Statement 생성"]
+    C --> D["executor.c<br/>실행 경로 결정"]
+    D --> E["storage.c<br/>CSV 읽기/쓰기"]
+    D --> F["bptree.c<br/>id -> offset 검색"]
 ```
 
-## 이번 주 핵심: PK 조회는 B+ Tree
+---
 
-- 이번 요구사항의 핵심은 `SELECT * FROM users WHERE id = ?`처럼 PK 하나를 찾을 때 B+ Tree 인덱스를 사용하는 것입니다.
-- 현재 구현은 여기에 더해 PK 범위 조회 `id > ?`, `id < ?`도 leaf 연결을 따라 처리합니다.
-- 반대로 `name`, `age` 같은 PK가 아닌 컬럼 조건은 기존 CSV 선형 탐색 흐름을 그대로 유지합니다.
-- 발표에서는 아래 순서로 보면 핵심이 가장 빨리 들어옵니다.
-  - `PK 조회와 일반 조회의 분기` Mermaid
-  - `조회 방식 요약` 표
-  - 아래 `7주차: B+ Tree 인덱스`의 exact lookup Mermaid
+## 3. INSERT 실행 시 B+ Tree 적재 흐름
 
-### 1. PK 조회와 일반 조회의 분기
+INSERT는 파서가 만든 `InsertStatement`를 `execute_insert()`가 받아 처리합니다.  
+사용자가 컬럼 순서를 바꿔 입력해도 `build_insert_row_values()`에서 스키마 순서로 다시 맞추고, `id`가 빠져 있으면 자동 PK를 채웁니다.  
+CSV에 쓰기 직전 `storage_append_row()`가 `ftell()`로 row offset을 구하고, 저장이 끝나면 `bptree_insert(id, offset)`으로 인덱스를 갱신합니다.
+
+```mermaid
+flowchart LR
+    A["execute_program()<br/>SQL 문장을 순서대로 실행"] --> B["execute_insert()<br/>INSERT 실행 전체 제어"]
+    B --> C["load_table_schema()<br/>컬럼 순서와 타입 확인"]
+    C --> D["build_insert_row_values()<br/>입력 값을 스키마 순서로 재배치"]
+    D --> E["validate_primary_key_unique()<br/>중복 id 여부 검사"]
+    E --> F["storage_append_row()<br/>CSV 끝에 저장하고 ftell()로 offset 획득"]
+    F --> G["bptree_insert(id, offset)<br/>id로 CSV 위치를 찾도록 인덱스 등록"]
+```
+
+```text
+CSV 저장 순서 = INSERT 순서
+B+ Tree 정렬 순서 = id 순서
+```
+
+---
+
+## 4. SELECT 실행 시 Index / Scan 분기
+
+SELECT는 `execute_select()`에서 먼저 스키마와 출력 컬럼을 확인합니다.  
+이후 WHERE 조건이 PK인 `id`를 대상으로 하는지 보고 실행 방식이 갈라집니다.  
+`WHERE id = ?`는 B+ Tree에서 offset 하나를 찾고, `WHERE id > ?`, `WHERE id < ?`는 leaf 연결을 따라 range scan을 합니다.  
+반면 `name`, `age` 같은 일반 컬럼 조건이나 `id != ?`는 인덱스를 쓰지 않고 CSV를 처음부터 끝까지 읽습니다.
 
 ```mermaid
 flowchart TD
-    A["SELECT ... WHERE ..."] --> B{"WHERE column is id?"}
-    B -->|Yes| C{"Operator is =, >, < ?"}
-    C -->|Yes| D["B+ Tree search / range scan"]
-    D --> E["row offset 확보"]
-    E --> F["CSV에서 필요한 row만 읽기"]
-    C -->|No| G["CSV 전체 선형 탐색"]
-    B -->|No| G
-    G --> H["각 row를 조건과 비교"]
-    H --> I["결과 출력"]
+    A["execute_select()<br/>SELECT 실행 방식 결정"] --> B["resolve_selected_columns()<br/>출력할 컬럼을 스키마 인덱스로 변환"]
+    B --> C{"WHERE 있음?"}
+    C -->|No| D["storage_print_rows()<br/>CSV 전체 row 출력"]
+    C -->|Yes| E["resolve_where_column()<br/>WHERE 컬럼과 값 타입 검증"]
+    E --> F{"PK id 조건?"}
+    F -->|"id = ?"| G["execute_select_with_index()<br/>단일 PK 조회 경로"]
+    G --> H["bptree_search()<br/>id로 row offset 1개 검색"]
+    H --> I["storage_print_row_at_offset()<br/>fseek()로 해당 row만 읽기"]
+    F -->|"id > ? / id < ?"| J["execute_select_with_index_range()<br/>PK 범위 조회 경로"]
+    J --> K["bptree_visit_*()<br/>leaf 연결을 따라 offset 수집"]
+    K --> L["storage_print_rows_at_offsets()<br/>수집한 row들만 읽기"]
+    F -->|"그 외"| M["execute_select_with_scan()<br/>인덱스 없이 선형 탐색 선택"]
+    M --> N["storage_print_rows_where_equals()<br/>CSV를 끝까지 읽으며 조건 비교"]
 ```
 
-### 2. INSERT가 인덱스를 유지하는 방식
+---
 
-```mermaid
-flowchart LR
-    A["INSERT INTO users (name, age) VALUES ('kim', 20)"] --> B["현재 max id + 1 계산"]
-    B --> C["CSV에 새 row append"]
-    C --> D["ftell()로 row offset 기록"]
-    D --> E["B+ Tree에 id -> offset 등록"]
+## 5. Full Scan과 Index 방식 차이
+
+`id` 조건은 B+ Tree가 CSV 위치를 바로 알려주기 때문에 필요한 row만 `fseek()`로 읽습니다.  
+반대로 `age`, `name` 조건은 인덱스가 없으므로 CSV 첫 row부터 마지막 row까지 파싱하고 비교합니다.
+
+```text
+[INDEX]       WHERE id = 900000
+[INDEX-RANGE] WHERE id > 999990
+[SCAN]        WHERE name = 'user900000'
+elapsed: ... ms
 ```
 
-### 3. 프로그램 재실행 후 인덱스 재구성
+결과가 적은 PK 조회에서는 인덱스 효과가 크고, 결과가 거의 전체 row인 조건은 출력 비용이 커서 차이가 줄어듭니다. 이 차이를 선택도(selectivity)라고 설명할 수 있습니다.
 
-```mermaid
-flowchart LR
-    A["프로그램 시작 / 첫 테이블 접근"] --> B["users.csv scan"]
-    B --> C["각 row의 id와 offset 읽기"]
-    C --> D["메모리 B+ Tree rebuild"]
+---
+
+## 6. B+ Tree 핵심 구현
+
+B+ Tree는 `bptree.c`에 독립 모듈로 구현했습니다.  
+key는 `id`, value는 CSV row offset이며, 중복 key는 허용하지 않습니다.
+
+```text
+bptree_insert()  : key를 정렬된 leaf node에 삽입
+bptree_search()  : id로 offset 1개 검색
+leaf split       : leaf가 가득 차면 오른쪽 leaf를 만들고 key를 나눔
+internal split   : 부모 node도 가득 차면 split 후 promoted key를 위로 올림
+leaf next        : id > ?, id < ? 범위 조회에서 순차 이동에 사용
 ```
 
-### 조회 방식 요약
+이 구현 덕분에 `WHERE id = ?`는 tree 높이만큼만 이동해 offset을 찾고, `WHERE id > ?`, `WHERE id < ?`는 leaf 연결을 따라 필요한 offset들을 모을 수 있습니다.
 
-| 쿼리 | 실행 로그 | 실제 경로 | 설명 |
-| --- | --- | --- | --- |
-| `SELECT * FROM users WHERE id = 2;` | `[INDEX]` | B+ Tree exact search -> offset -> 해당 row 읽기 | 이번 과제의 핵심 |
-| `SELECT * FROM users WHERE id > 2;` | `[INDEX-RANGE]` | B+ Tree leaf range scan | 추가 구현 |
-| `SELECT name FROM users WHERE name = 'kim';` | `[SCAN]` | CSV 전체 선형 탐색 | PK 인덱스가 아님 |
-| `SELECT id, name FROM users WHERE age != 20;` | `[SCAN]` | CSV 전체 선형 탐색 | 현재 인덱스 범위 밖 |
+---
 
-## 실행 흐름
+## 7. 메모리 인덱스 재구성
 
-```mermaid
-flowchart LR
-    A["main.c"] --> B["app.c"]
-    B --> C["tokenizer.c"]
-    C --> D["parser.c"]
-    D --> E["executor.c"]
-    E --> F["storage.c / schema.c / bptree.c"]
+이번 인덱스는 디스크에 저장하지 않는 메모리 기반 구조입니다.  
+따라서 프로그램을 새로 실행하면 B+ Tree는 비어 있고, 기존 CSV 데이터와 다시 연결하는 과정이 필요합니다.
+
+테이블을 처음 접근할 때 `get_table_state_index()`가 런타임 상태를 확인합니다.  
+상태가 없으면 `create_table_state()`가 B+ Tree를 만들고, `storage_rebuild_pk_index()`가 CSV를 한 번 읽어 기존 row의 `id -> offset`을 다시 등록합니다.
+
+```text
+테이블 처음 접근
+-> get_table_state_index()
+-> create_table_state()
+-> storage_rebuild_pk_index()
+-> CSV의 기존 id와 offset을 B+ Tree에 재등록
 ```
 
-| 단계 | 함수 / 파일 | 핵심 역할 |
-| --- | --- | --- |
-| 1 | `main.c` | 프로그램 진입점 |
-| 2 | `app.c` | SQL 파일 읽기 또는 interactive 입력 처리 |
-| 3 | `tokenizer.c` | SQL 문자열을 토큰 배열로 분리 |
-| 4 | `parser.c` | 토큰 배열을 `SqlProgram`으로 변환 |
-| 5 | `executor.c` + `storage.c` + `schema.c` + `bptree.c` | 스키마 확인, PK 검증, 인덱스/CSV 반영 |
+이후 같은 실행 안에서는 이미 만들어진 B+ Tree를 재사용하므로, 두 번째 PK 조회부터는 재구성 비용 없이 바로 검색합니다.
 
-### 단계별 예시 이미지
+---
 
-### 1. `tokenizer.c`
+## 검증과 마무리
 
-```mermaid
-flowchart LR
-    A["SELECT name, age FROM users;"] --> B["[SELECT] [name] [,] [age] [FROM] [users] [;]"]
-```
-
-### 2. `parser.c` - SELECT
-
-```mermaid
-flowchart LR
-    A["[SELECT] [name] [,] [age] [FROM] [users] [;]"] --> B["Statement<br/>type = SELECT"]
-    B --> C["SelectStatement<br/>table_name = users<br/>select_all = 0<br/>column_names = [name, age]"]
-```
-
-### 3. `executor.c` + `storage.c` - SELECT
-
-```mermaid
-flowchart LR
-    A["SelectStatement<br/>table = users<br/>columns = [name, age]"] --> B["load_table_schema()"]
-    B --> C["users.schema 확인<br/>id, name, age"]
-    C --> D["resolve_selected_columns()"]
-    D --> E["storage_print_rows()"]
-    E --> F["name age 출력"]
-```
-
-### 4. `parser.c` - INSERT
-
-```mermaid
-flowchart LR
-    A["INSERT INTO users (name, age, id) VALUES ('lee', 30, 2);"] --> B["Statement<br/>type = INSERT"]
-    B --> C["InsertStatement<br/>table_name = users<br/>column_names = [name, age, id]<br/>values = ['lee', 30, 2]"]
-```
-
-### 5. `executor.c` + `storage.c` - INSERT
-
-```mermaid
-flowchart LR
-    A["InsertStatement<br/>name, age, id"] --> B["load_table_schema()"]
-    B --> C["users.schema 확인<br/>id, name, age"]
-    C --> D["build_insert_row_values()"]
-    D --> E["2, lee, 30 재배치"]
-    E --> F["storage_append_row()"]
-    F --> G["2,lee,30 저장"]
-```
-
-## 핵심 구조체
-
-| 구조체 | 역할 | 생성 단계 | 포함 |
-| --- | --- | --- | --- |
-| `TokenList` | SQL 문자열을 잘라낸 토큰 배열 | `tokenizer.c` | `Token[]` |
-| `SqlProgram` | 파싱된 SQL 문장 목록 | `parser.c` | `Statement[]` |
-| `Statement` | `INSERT` / `SELECT` 구분 단위 | `parser.c` | `InsertStatement` or `SelectStatement` |
-| `AppConfig` | 실행 경로와 interactive 모드 설정 | `app.c` | `schema_dir`, `data_dir`, `input_path`, `interactive_mode` |
-| `InsertStatement` | 테이블명, 컬럼명[], 값[] | `parser.c` | `LiteralValue[]` |
-| `SelectStatement` | 테이블명, `select_all`, 컬럼명[] | `parser.c` | — |
-| `TableSchema` | 컬럼 순서·타입·PK 위치 정의 | `schema.c` | `ColumnSchema[]`, `primary_key_index` |
-| `BPlusTree` | PK `id`로 CSV row offset을 찾는 메모리 인덱스 | `executor.c` / `storage.c` | leaf 연결, `id -> offset` |
-| `ErrorInfo` | 오류 메시지 + 위치 | 전 단계 공용 | — |
-
-### 구조체를 사용하는 이유
-
-- tokenizer 결과와 parser 결과를 단계별로 분리해서 저장하기 위해 사용했습니다.
-- `INSERT`, `SELECT`를 문자열이 아니라 정리된 데이터 형태로 넘기기 위해 사용했습니다.
-- executor가 스키마 기준으로 컬럼 순서와 타입을 확인하기 쉽게 만들기 위해 사용했습니다.
-- 오류가 어느 단계에서 났는지 같은 형식으로 기록하기 위해 사용했습니다.
-
-### 구조체를 사용했을 때 장점
-
-- 각 단계가 어떤 데이터를 받고 어떤 데이터를 만드는지 바로 보입니다.
-- tokenizer, parser, executor 역할이 섞이지 않습니다.
-- `INSERT`, `SELECT` 문장을 같은 `Statement` 단위로 관리할 수 있습니다.
-- 디버깅할 때 문자열 전체를 다시 읽지 않고, 정리된 결과만 보면 됩니다.
-- 발표에서도 "문자열 -> 토큰 -> 문장 구조체 -> 실행" 흐름을 설명하기 쉽습니다.
-
-## 지원 SQL
-
-```sql
-INSERT INTO users VALUES (1, 'kim', 20);
-INSERT INTO users (name, age) VALUES ('lee', 30);
-SELECT * FROM users;
-SELECT name, age FROM users;
-SELECT * FROM users WHERE id = 1;
-SELECT name FROM users WHERE name = 'kim';
-SELECT * FROM users WHERE id > 999990;
-SELECT id, name FROM users WHERE age != 20;
-```
-
-## 7주차: B+ Tree 인덱스
-
-아래 두 그림은 PK exact lookup과 일반 scan이 실제로 어디서 갈라지는지 보여줍니다.
-
-```mermaid
-flowchart LR
-    A["SELECT * FROM users WHERE id = 900000"] --> B["parser.c<br/>where_column = id"]
-    B --> C["executor.c<br/>PK 조건인지 확인"]
-    C --> D["B+ Tree search(900000)"]
-    D --> E["row offset 획득"]
-    E --> F["storage_print_row_at_offset()"]
-    F --> G["CSV에서 해당 row만 읽기"]
-```
-
-```mermaid
-flowchart LR
-    A["SELECT name, age FROM users WHERE name = 'user900000'"] --> B["parser.c<br/>where_column = name"]
-    B --> C["executor.c<br/>PK 조건 아님"]
-    C --> D["storage_print_rows_where_equals()"]
-    D --> E["CSV 전체 선형 탐색"]
-```
-
-- `INSERT INTO users (name, age) VALUES ('kim', 20);`처럼 `id`를 생략하면 자동으로 다음 PK가 부여됩니다.
-- CSV에 row를 쓰기 직전 `ftell()`로 row 시작 위치를 얻고, B+ Tree에는 `id -> CSV offset`만 저장합니다.
-- 프로그램 실행 중 테이블을 처음 사용할 때 기존 CSV를 스캔해 메모리 B+ Tree를 재구성합니다.
-- `SELECT * FROM users WHERE id = 2;`는 `[INDEX]` 로그를 출력하고 B+ Tree로 row offset을 찾아 필요한 row만 읽습니다.
-- 이번 요구사항의 핵심은 위 exact lookup 경로입니다.
-- `SELECT * FROM users WHERE id > 999990;`와 `id < ...`는 `[INDEX-RANGE]` 로그를 출력하고 B+ Tree leaf 연결을 따라 범위 결과를 찾습니다.
-- `SELECT * FROM users WHERE name = 'kim';`처럼 PK가 아닌 컬럼 조건은 `[SCAN]` 로그를 출력하고 CSV를 선형 탐색합니다.
-- `!=` 조건은 인덱스 범위가 아니므로 `[SCAN]`으로 처리합니다.
-
-### 인덱스 데모
+- B+ Tree 삽입 / 검색 / split 테스트
+- 자동 PK 증가와 중복 PK 방지 테스트
+- `WHERE id` 인덱스 조회, `WHERE name`, `WHERE age` full scan 테스트
+- 1,000,000건 CSV 생성 후 성능 비교
 
 ```bash
-make
 make test
-rm -rf demo-data
-mkdir demo-data
-./build/sqlproc --schema-dir ./examples/schemas --data-dir ./demo-data ./examples/index_demo.sql
-```
-
-### 성능 비교
-
-```bash
-make bench
-./build/bench_index
-```
-
-빠르게 시연하려면 아래 순서가 가장 이해하기 쉽습니다.
-
-1. `./build/sqlproc --schema-dir ./examples/schemas --data-dir ./demo-data ./examples/index_demo.sql`
-2. `./build/sqlproc --schema-dir ./examples/schemas --data-dir ./demo-data ./examples/perf_compare.sql`
-3. `./build/bench_index`
-
-기본값은 1,000,000개 레코드입니다. 더 작은 값으로 빠르게 확인하려면 아래처럼 실행할 수 있습니다.
-
-```bash
-./build/bench_index 10000
-```
-
-`sqlproc`에서 바로 조회할 수 있는 100만 건 CSV를 만들려면 아래 명령을 사용합니다.
-
-```bash
-make seed-demo-data
-./build/sqlproc --schema-dir ./examples/schemas --data-dir ./demo-data --interactive
-```
-
-이후 대화형 모드에서 아래처럼 확인할 수 있습니다.
-
-```sql
-SELECT * FROM users WHERE id = 900000;
-SELECT * FROM users WHERE id > 999990;
-SELECT id, name FROM users WHERE age != 20;
-SELECT name, age FROM users WHERE name = 'user900000';
-```
-
-레코드 수나 출력 파일을 바꾸고 싶으면 `make` 변수로 조절할 수 있습니다.
-
-```bash
-make seed-demo-data RECORDS=10000
-make seed-demo-data RECORDS=1000000 DATA_PATH=demo-data/users.csv
-```
-
-시간 차이를 바로 비교하려면 아래 예제를 실행합니다. 각 `SELECT` 뒤에
-`elapsed: ... ms`가 출력됩니다.
-
-```bash
+make seed-demo-data RECORDS=1000000
 ./build/sqlproc --schema-dir ./examples/schemas --data-dir ./demo-data ./examples/perf_compare.sql
 ```
 
-`bench_index`는 CSV를 직접 만들고 B+ Tree와 선형 탐색 비용을 비교하는
-보조 벤치마크 도구입니다. parser/executor까지 포함한 전체 데모는 위
-`perf_compare.sql` 또는 `index_demo.sql`로 확인할 수 있습니다.
-
-예시 측정 결과도 함께 남깁니다. 아래 수치는 `2026-04-15`에
-`./build/bench_index 1000000 /tmp/bench-users-1m.csv`로 실행한 로컬 결과이며,
-환경에 따라 달라질 수 있습니다.
-
-| 레코드 수 | PK 조회 (`id = 900000`) | 비-PK 조회 (`name = 'user900000'`) |
-| --- | --- | --- |
-| 1,000,000 | `0.002000 ms` | `86.038 ms` |
-
-- 스키마에 `id:int` 컬럼이 있으면 PK로 인식하고, `INSERT`에서 `id`를 빼면 현재 최대값 + 1을 자동 부여합니다.
-- 이미 존재하는 `id`를 넣으면 `PK 값이 이미 존재합니다.` 오류로 거절합니다.
-- 현재 `WHERE`는 단일 조건 `=`, `>`, `<`, `!=`를 지원합니다.
-- 인덱스는 `WHERE id = 값`, `WHERE id > 값`, `WHERE id < 값`에서 사용됩니다.
-- 아직 지원하지 않는 문법은 `AND`, `OR`, `JOIN`, `ORDER BY`, `UPDATE`, `DELETE`입니다.
-
-## 실행 모드
-
-- 새 데이터 디렉터리를 쓸 때는 먼저 `mkdir -p /tmp/sqlproc-data`처럼 부모 디렉터리를 만들어 두어야 합니다.
-- 파일 모드: `./build/sqlproc --schema-dir ./examples/schemas --data-dir /tmp/sqlproc-data ./examples/demo.sql`
-- interactive 모드: `./build/sqlproc --schema-dir ./examples/schemas --data-dir /tmp/sqlproc-data --interactive`
-- interactive 모드에서는 `sqlproc>` 프롬프트에서 SQL 한 줄씩 입력하고 `.exit`로 종료합니다.
-
-## 시연 예시
-
-![시연 예시](./docs/images/demo-run.png)
-
-```sql
-INSERT INTO users VALUES (1, 'kim', 20);
-INSERT INTO users (name, age) VALUES ('lee', 30);
-INSERT INTO users VALUES (3, 'park', 27);
-INSERT INTO users (age, name) VALUES (41, 'choi');
-INSERT INTO users VALUES (5, 'jung', 33);
-SELECT * FROM users;
-SELECT name, age FROM users;
-SELECT age, id FROM users;
-```
-
-## 우리 팀의 포인트
-
-### 1. tokenizer, parser, executor의 오류를 나눠서 처리
-
-| 단계      | 대표 메시지                            |
-| --------- | -------------------------------------- |
-| Tokenizer | `지원하지 않는 문자를 찾았습니다.`     |
-| Tokenizer | `문자열 리터럴이 닫히지 않았습니다.`   |
-| Parser    | `FROM 키워드가 필요합니다.`            |
-| Parser    | `문장 끝에는 세미콜론이 필요합니다.`   |
-| Parser    | `컬럼 수와 값 수가 일치하지 않습니다.` |
-| Executor  | `INSERT 값 타입이 스키마와 맞지 않습니다.` |
-| Executor  | `SELECT 대상 컬럼이 스키마에 없습니다.` |
-| Executor  | `PK 값이 이미 존재합니다.` |
-| Executor  | `문자열 값이 CSV에서 수식으로 해석될 수 없습니다.` |
-
-```mermaid
-flowchart LR
-    A["입력 SQL"] --> B["Tokenizer 오류<br/>지원하지 않는 문자"]
-    A --> C["Parser 오류<br/>키워드 누락 / 문장 형식 오류"]
-    A --> D["Executor 오류<br/>스키마 불일치 / 타입 오류"]
-```
-
-예시:
-
-- tokenizer 오류: `SELECT @ FROM users;`
-- parser 오류: `SELECT name users;`
-- executor 오류: `INSERT INTO users VALUES ('kim', 1, 20);`
-
-### 2. storage.c에서도 파일/CSV 오류를 따로 처리
-
-| 구분 | 대표 메시지 |
-| --- | --- |
-| Storage | `데이터 파일을 만들 수 없습니다.` |
-| Storage | `기존 데이터 파일 헤더 형식이 잘못되었습니다.` |
-| Storage | `CSV 헤더가 스키마와 다릅니다.` |
-| Storage | `CSV 헤더 순서가 스키마와 다릅니다.` |
-| Storage | `CSV 행을 읽는 중 오류가 발생했습니다.` |
-
-```mermaid
-flowchart LR
-    A["storage_append_row()<br/>storage_print_rows()"] --> B["파일 열기 / 헤더 확인"]
-    B --> C["CSV 형식 검증"]
-    C --> D["Storage 오류 메시지 반환"]
-```
-
-예시:
-
-- storage 오류: `데이터 파일을 만들 수 없습니다.`
-- storage 오류: `CSV 헤더가 스키마와 다릅니다.`
-
-### 3. 오류 위치까지 함께 출력
-
-```text
-오류: 지원하지 않는 문자를 찾았습니다. (line 1, column 8)
-오류: FROM 키워드가 필요합니다. (line 1, column 13)
-```
-
-```mermaid
-flowchart LR
-    A["SELECT @ FROM users;"] --> B["line 1, column 8"]
-    C["SELECT name users;"] --> D["line 1, column 13"]
-```
-
-### 4. 스키마를 기준으로 컬럼 순서와 타입을 맞춤
-
-```text
-id:int,name:string,age:int
-```
-
-- 컬럼 순서를 통일합니다.
-- `int`, `string` 타입을 검증합니다.
-- 사용자가 컬럼 순서를 바꿔도 schema 기준으로 다시 맞춥니다.
-
-```mermaid
-flowchart LR
-    A["INSERT INTO users (name, id, age) VALUES ('kim', 1, 20)"] --> B["schema 확인"]
-    B --> C["id, name, age 순서로 재배치"]
-    C --> D["1,kim,20 저장"]
-```
-
-### 5. executor와 storage를 분리해 역할을 명확히 구분
-
-- 스키마에 `id:int` 컬럼이 있으면 `schema.c`가 PK 위치를 기억합니다.
-- `INSERT`에서 `id`를 생략하면 `executor.c`가 기존 CSV의 최대 `id`를 읽어 다음 값을 채웁니다.
-- 저장 직전에는 같은 `id`가 이미 있는지 확인해 중복 PK를 막습니다.
-
-```mermaid
-flowchart LR
-    subgraph executor["executor.c — SQL 로직"]
-        E1["타입·이름 검증"]
-        E2["컬럼 순서 재배치"]
-        E3["PK 자동 발급·중복 검사"]
-    end
-    subgraph storage["storage.c — 파일 입출력"]
-        S1["CSV 헤더 생성·검증"]
-        S2["행 읽기·쓰기"]
-        S3["최대 PK / 중복 PK 확인"]
-    end
-    executor -->|"storage 인터페이스 호출"| storage
-```
-
-- `storage_append_row()` — INSERT 시 CSV에 한 행 추가
-- `storage_print_rows()` — SELECT 시 해당 컬럼만 출력
-- `storage_find_max_int_value()` — 자동 PK 발급용 최대값 계산
-- `storage_int_value_exists()` — PK 중복 여부 확인
-- storage.c를 교체해도 executor.c를 건드릴 필요가 없음
-
-## 협업과 회고
-
-| 주제      | 내용                                                                  |
-| --------- | --------------------------------------------------------------------- |
-| 리뷰 방식 | `AGENTS.md`의 멀티 페르소나 관점을 참고해 에이전트를 리뷰어처럼 활용  |
-| 협업 방식 | 한 컴퓨터에서 상세 프롬프트를 작성하고 같은 환경에서 바로 빌드·테스트 |
-| 효과      | 정확성, 자료구조 일관성, 초심자 가독성을 분리해 점검 가능             |
-
-### 작업 플로우
-
-```mermaid
-flowchart TD
-    START([새 작업 시작]) --> CHECK
-
-    subgraph CHECK["① 작업 전 확인"]
-        C1["git status / log 확인"]
-        C2["README · session-logs 확인"]
-        C1 --> C2
-    end
-
-    CHECK --> DEV["② feature 브랜치에서 개발<br/>-std=c99 -Wall -Wextra -Werror"]
-    DEV --> TEST["③ make + make test"]
-    TEST --> REVIEW
-
-    subgraph REVIEW["④ 멀티 페르소나 코드 리뷰"]
-        direction LR
-        R1["정확성 · 버그"]
-        R2["자료구조 무결성"]
-        R3["초심자 가독성 · C99"]
-    end
-
-    REVIEW --> LOG["⑤ 세션 로그 작성<br/>docs/session-logs/YYYY-MM-DD_...md"]
-    LOG --> ISSUE["⑥ GitHub Issue 생성<br/>검증 범위 · 발견 문제 · 남은 리스크"]
-    ISSUE --> PR["⑦ PR 생성"]
-    PR --> PASS{"테스트 통과?"}
-    PASS -->|Yes| MERGE([feature → dev merge])
-    PASS -->|No| DEV
-```
+정리하면, 이번 구현은 기존 SQL 처리기 구조를 유지하면서 `executor.c`에서 조회 방식을 분기하도록 연결한 것이 핵심입니다.  
+PK 조회는 B+ Tree로 빠르게 offset을 찾고, 그 외 조건은 CSV 선형 탐색으로 처리해 두 방식의 차이를 로그와 실행 시간으로 확인할 수 있습니다.
