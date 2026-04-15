@@ -110,6 +110,9 @@ elapsed: ... ms
 
 ## 6. B+ Tree 핵심 구현
 
+
+<img width="5200" height="2732" alt="image" src="https://github.com/user-attachments/assets/6cfce597-0ea3-4630-8ac1-804aabbfa5eb" />
+
 B+ Tree는 `bptree.c`에 독립 모듈로 구현했습니다.  
 key는 `id`, value는 CSV row offset이며, 중복 key는 허용하지 않습니다.
 
@@ -160,3 +163,6 @@ make seed-demo-data RECORDS=1000000
 
 정리하면, 이번 구현은 기존 SQL 처리기 구조를 유지하면서 `executor.c`에서 조회 방식을 분기하도록 연결한 것이 핵심입니다.  
 PK 조회는 B+ Tree로 빠르게 offset을 찾고, 그 외 조건은 CSV 선형 탐색으로 처리해 두 방식의 차이를 로그와 실행 시간으로 확인할 수 있습니다.
+
+
+
