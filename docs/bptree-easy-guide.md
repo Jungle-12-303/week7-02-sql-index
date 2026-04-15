@@ -303,6 +303,24 @@ flowchart TD
     L -->|Yes| M["새 root 생성"]
 ```
 
+### split 전에 먼저 하는 일
+
+초심자가 많이 헷갈리는 부분은 "꽉 찬 node에 새 key를 넣을 때, 기존 배열을
+어떻게 다루는가"입니다. 이 구현은 기존 node를 바로 반으로 자르지 않고,
+먼저 "넣었을 때의 전체 모습"을 임시 배열로 만듭니다.
+
+이 문서에서 `promoted key`는 "split 결과 중 부모로 올라가는 경계값"이라고
+생각하면 가장 이해하기 쉽습니다.
+
+- leaf split에서는 `temp_keys[]`, `temp_offsets[]`를 만듭니다.
+- internal split에서는 `temp_keys[]`, `temp_children[]`를 만듭니다.
+- 그다음 삽입이 반영된 임시 배열의 총 개수를 기준으로
+  `split_index = total_count / 2` 또는 `split_index = total_keys / 2`를 계산합니다.
+- 마지막으로 왼쪽 node, 오른쪽 node, 부모로 올라갈 key를 나눕니다.
+
+이렇게 하면 "정렬된 상태로 한 번 넣고, 그 결과를 반으로 자른다"는 식으로
+생각할 수 있어서 훨씬 이해하기 쉽습니다.
+
 ### leaf split을 예로 보면
 
 이 구현은 leaf에 key가 최대 3개까지 들어갑니다.
@@ -330,6 +348,122 @@ flowchart LR
 
 여기서 중요한 점은 `4`가 부모에게 올라간다는 것입니다.
 부모는 "오른쪽 leaf는 4부터 시작한다"는 정보만 기억합니다.
+
+코드 기준으로 보면 이 과정은 아래 순서입니다.
+
+1. `find_leaf_position()`으로 새 key가 들어갈 자리를 찾음
+2. 기존 key와 offset을 `temp_keys[]`, `temp_offsets[]`에 정렬된 상태로 복사
+3. `total_count = 4`, `split_index = 4 / 2 = 2` 계산
+4. 왼쪽 leaf는 앞 2개를 유지
+5. 오른쪽 leaf는 뒤 2개를 새로 가짐
+6. `right->keys[0]`을 `promoted_key`로 부모에게 전달
+7. `next` 포인터를 다시 연결해 range scan 순서를 유지
+
+즉 이 프로젝트의 leaf split에서 promoted key는
+"삽입 후 임시 배열을 둘로 나눴을 때 오른쪽 leaf의 첫 번째 key"입니다.
+부모 입장에서는 이 값만 알면 "이 값 이상이면 오른쪽 leaf로 가라"는
+경계선을 세울 수 있기 때문입니다.
+
+### 왜 leaf에서는 `right->keys[0]`이 올라갈까
+
+leaf node는 실제 `id -> offset` 데이터를 직접 저장합니다.
+그래서 leaf split 후에도 데이터는 왼쪽 leaf와 오른쪽 leaf에 그대로 남아 있어야 합니다.
+
+즉 부모는 데이터를 가져가는 것이 아니라, 아래 둘을 구분하는 "경계값"만
+기억하면 됩니다.
+
+```text
+left leaf   : [1 | 3]
+right leaf  : [4 | 5]
+parent key  : 4
+```
+
+부모가 `4`를 기억하면:
+
+- `4`보다 작은 값은 왼쪽 leaf
+- `4` 이상인 값은 오른쪽 leaf
+
+처럼 내려갈 방향을 결정할 수 있습니다.
+
+### internal split은 leaf split과 무엇이 다를까
+
+internal node는 leaf와 달리 실제 row offset을 저장하지 않습니다.
+대신 "어느 child로 내려갈지"를 안내하는 separator key만 갖고 있습니다.
+
+그래서 internal split에서는 leaf split과 promoted key 처리 방식이 조금 다릅니다.
+
+- leaf split:
+  오른쪽 leaf의 첫 key를 부모가 경계값으로 복사해서 사용
+- internal split:
+  가운데 key 하나를 부모로 "올려 보내고", 좌우 internal node에서는 그 key를 빼고 나눔
+
+이 차이가 중요한 이유는, internal node의 key는 실제 데이터 저장값이라기보다
+"자식 구간을 나누는 표지판" 역할이기 때문입니다.
+
+예를 들어 internal node가 꽉 찬 상태에서 새 separator key까지 합쳐
+임시로 아래처럼 되었다고 가정해 보겠습니다.
+
+```text
+temp_keys     = [3 | 5 | 7 | 9]
+temp_children = [c0(<3) | c1(3~5) | c2(5~7) | c3(7~9) | c4(>=9)]
+```
+
+여기서 `total_keys = 4`, `split_index = 4 / 2 = 2`가 됩니다.
+그러면 `temp_keys[2]`, 즉 `7`이 부모로 올라갑니다.
+
+```mermaid
+flowchart LR
+    A["temp internal<br/>keys = [3 | 5 | 7 | 9]<br/>children = [c0 | c1 | c2 | c3 | c4]"]
+    A --> B["split_index = 2"]
+    B --> C["left internal<br/>keys = [3 | 5]<br/>children = [c0 | c1 | c2]"]
+    B --> D["promoted key = 7"]
+    B --> E["right internal<br/>keys = [9]<br/>children = [c3 | c4]"]
+```
+
+이 과정을 초심자 기준으로 다시 말하면:
+
+1. 부모 후보 key까지 포함해서 "임시로 4개 key"를 만든다
+2. 가운데 위치의 key 하나를 고른다
+3. 그 key는 상위 부모에게 넘긴다
+4. 왼쪽 internal은 그보다 작은 구간 담당
+5. 오른쪽 internal은 그보다 큰 구간 담당
+
+즉 internal split에서 promoted key는 "가운데 key"입니다.
+그리고 이 key는 좌우 internal node 둘 중 어느 쪽에도 남지 않습니다.
+
+### leaf split과 internal split을 한 번에 비교하면
+
+| 상황 | promoted key 기준 | promoted key가 원래 node에 남나? | 이유 |
+| --- | --- | --- | --- |
+| leaf split | 오른쪽 leaf의 첫 key | 예, 오른쪽 leaf에 그대로 남음 | leaf는 실제 데이터를 저장하므로 값이 사라지면 안 됨 |
+| internal split | 가운데 key | 아니오, 부모로만 올라감 | internal key는 child 경계 표시이므로 부모 separator로 쓰면 충분 |
+
+### root split은 언제 생길까
+
+가장 아래 leaf에서 split이 나면 그 결과가 부모로 올라갑니다.
+그런데 부모도 이미 꽉 차 있으면 부모도 다시 split합니다.
+이 일이 root까지 전파되면 마지막에는 새 root를 하나 더 만들게 됩니다.
+이때 새 root는 방금 split된 왼쪽 child와 오른쪽 child를 가리키므로,
+처음 만들어질 때는 자식 2개로 시작합니다.
+
+```mermaid
+flowchart TD
+    A["leaf split"] --> B["promoted key가 parent로 올라감"]
+    B --> C{"parent 공간 있음?"}
+    C -->|Yes| D["parent에 삽입 후 종료"]
+    C -->|No| E["parent도 split"]
+    E --> F{"그 parent가 root인가?"}
+    F -->|No| G["한 단계 더 위로 promoted key 전달"]
+    F -->|Yes| H["새 root 생성"]
+```
+
+이 문서 앞부분의 실제 스냅샷에서 `root -> internal -> leaf` 3단 구조가 된 것도
+바로 이 "split이 위로 전파되는 과정" 때문입니다.
+
+### promoted key를 읽을 때 초심자가 기억하면 좋은 한 문장
+
+- leaf에서 올라가는 key: "오른쪽 leaf가 어디서 시작하는지 알려 주는 값"
+- internal에서 올라가는 key: "왼쪽 구간과 오른쪽 구간을 가르는 가운데 경계값"
 
 ## 중복 key는 왜 막을까
 
