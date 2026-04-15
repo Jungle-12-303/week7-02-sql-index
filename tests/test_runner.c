@@ -24,7 +24,12 @@ static int write_text_file(const char *path, const char *text);
 static int write_generated_users_csv(const char *path, int record_count);
 static int read_first_two_elapsed_ms(const char *path, double *first_ms, double *second_ms);
 static int file_contains_text(const char *path, const char *needle);
+static int count_text_occurrences(const char *path, const char *needle);
+static int path_exists(const char *path);
 static int capture_run_program(const AppConfig *config, const char *output_path);
+static int capture_run_program_with_input(const AppConfig *config,
+                                          const char *input_text,
+                                          const char *output_path);
 static int capture_storage_print_rows(const AppConfig *config,
                                       const TableSchema *schema,
                                       const int selected_indices[SQLPROC_MAX_COLUMNS],
@@ -99,6 +104,62 @@ static int test_parse_arguments_fail(void)
     };
 
     return !parse_arguments(5, argv, &config);
+}
+
+static int test_parse_arguments_benchmark_short_success(void)
+{
+    AppConfig config;
+    char *argv[] = {
+        "sqlproc",
+        "--schema-dir", "schemas",
+        "--data-dir", "data",
+        "-b"
+    };
+
+    if (!parse_arguments(6, argv, &config)) {
+        return 0;
+    }
+
+    return strcmp(config.schema_dir, "schemas") == 0 &&
+           strcmp(config.data_dir, "data") == 0 &&
+           config.benchmark_mode == 1 &&
+           config.interactive_mode == 0 &&
+           config.input_path[0] == '\0';
+}
+
+static int test_parse_arguments_benchmark_long_success(void)
+{
+    AppConfig config;
+    char *argv[] = {
+        "sqlproc",
+        "--data-dir", "data",
+        "--benchmark",
+        "--schema-dir", "schemas"
+    };
+
+    if (!parse_arguments(6, argv, &config)) {
+        return 0;
+    }
+
+    return strcmp(config.schema_dir, "schemas") == 0 &&
+           strcmp(config.data_dir, "data") == 0 &&
+           config.benchmark_mode == 1 &&
+           config.interactive_mode == 0 &&
+           config.input_path[0] == '\0';
+}
+
+static int test_parse_arguments_reject_mixed_modes(void)
+{
+    AppConfig config;
+    char *argv[] = {
+        "sqlproc",
+        "--schema-dir", "schemas",
+        "--data-dir", "data",
+        "--benchmark",
+        "input.sql"
+    };
+
+    return !parse_arguments(7, argv, &config);
 }
 
 static int test_tokenize_select(void)
@@ -437,6 +498,42 @@ static int file_contains_text(const char *path, const char *needle)
     return strstr(buffer, needle) != NULL;
 }
 
+static int count_text_occurrences(const char *path, const char *needle)
+{
+    char buffer[8192];
+    char *cursor;
+    FILE *file;
+    size_t size;
+    int count;
+    size_t needle_length;
+
+    file = fopen(path, "rb");
+    if (file == NULL) {
+        return -1;
+    }
+
+    size = fread(buffer, 1, sizeof(buffer) - 1, file);
+    fclose(file);
+    buffer[size] = '\0';
+
+    count = 0;
+    needle_length = strlen(needle);
+    cursor = buffer;
+    while ((cursor = strstr(cursor, needle)) != NULL) {
+        count += 1;
+        cursor += needle_length;
+    }
+
+    return count;
+}
+
+static int path_exists(const char *path)
+{
+    struct stat info;
+
+    return stat(path, &info) == 0;
+}
+
 static int capture_run_program(const AppConfig *config, const char *output_path)
 {
     FILE *file;
@@ -467,6 +564,88 @@ static int capture_run_program(const AppConfig *config, const char *output_path)
     dup2(saved_stdout, STDOUT_FILENO);
     close(saved_stdout);
     fclose(file);
+    return result == 0;
+}
+
+static int capture_run_program_with_input(const AppConfig *config,
+                                          const char *input_text,
+                                          const char *output_path)
+{
+    char input_path[] = "/tmp/sqlproc_stdin_XXXXXX";
+    FILE *input_file;
+    FILE *output_file;
+    int input_descriptor;
+    int saved_stdin;
+    int saved_stdout;
+    int result;
+
+    input_descriptor = mkstemp(input_path);
+    if (input_descriptor < 0) {
+        return 0;
+    }
+
+    input_file = fdopen(input_descriptor, "wb");
+    if (input_file == NULL) {
+        close(input_descriptor);
+        unlink(input_path);
+        return 0;
+    }
+
+    if (fputs(input_text, input_file) == EOF) {
+        fclose(input_file);
+        unlink(input_path);
+        return 0;
+    }
+
+    fclose(input_file);
+    input_file = fopen(input_path, "rb");
+    if (input_file == NULL) {
+        unlink(input_path);
+        return 0;
+    }
+
+    output_file = fopen(output_path, "wb");
+    if (output_file == NULL) {
+        fclose(input_file);
+        unlink(input_path);
+        return 0;
+    }
+
+    fflush(stdout);
+    saved_stdin = dup(STDIN_FILENO);
+    saved_stdout = dup(STDOUT_FILENO);
+    if (saved_stdin < 0 || saved_stdout < 0) {
+        if (saved_stdin >= 0) {
+            close(saved_stdin);
+        }
+        if (saved_stdout >= 0) {
+            close(saved_stdout);
+        }
+        fclose(input_file);
+        fclose(output_file);
+        unlink(input_path);
+        return 0;
+    }
+
+    if (dup2(fileno(input_file), STDIN_FILENO) < 0 ||
+        dup2(fileno(output_file), STDOUT_FILENO) < 0) {
+        close(saved_stdin);
+        close(saved_stdout);
+        fclose(input_file);
+        fclose(output_file);
+        unlink(input_path);
+        return 0;
+    }
+
+    result = run_program(config);
+    fflush(stdout);
+    dup2(saved_stdin, STDIN_FILENO);
+    dup2(saved_stdout, STDOUT_FILENO);
+    close(saved_stdin);
+    close(saved_stdout);
+    fclose(input_file);
+    fclose(output_file);
+    unlink(input_path);
     return result == 0;
 }
 
@@ -1626,6 +1805,86 @@ static int test_load_schema_without_id_has_no_primary_key(void)
     return schema.primary_key_index == -1;
 }
 
+static int test_run_program_benchmark_mode(void)
+{
+    AppConfig config;
+    char base_dir[256];
+    char schema_dir[256];
+    char data_dir[256];
+    char output_path[512];
+    char benchmark_schema_path[512];
+    char benchmark_csv_path[512];
+    char benchmark_pk_sql_path[512];
+    char benchmark_non_pk_sql_path[512];
+    char original_users_csv_path[512];
+
+    if (!create_temp_workspace(base_dir,
+                               sizeof(base_dir),
+                               schema_dir,
+                               sizeof(schema_dir),
+                               data_dir,
+                               sizeof(data_dir),
+                               "sqlproc_benchmark_mode_")) {
+        return 0;
+    }
+
+    snprintf(output_path, sizeof(output_path), "%s/output.txt", base_dir);
+    snprintf(benchmark_schema_path,
+             sizeof(benchmark_schema_path),
+             "%s/benchmark/schemas/users.schema",
+             data_dir);
+    snprintf(benchmark_csv_path,
+             sizeof(benchmark_csv_path),
+             "%s/benchmark/data/users.csv",
+             data_dir);
+    snprintf(benchmark_pk_sql_path,
+             sizeof(benchmark_pk_sql_path),
+             "%s/benchmark/sql/pk_lookup.sql",
+             data_dir);
+    snprintf(benchmark_non_pk_sql_path,
+             sizeof(benchmark_non_pk_sql_path),
+             "%s/benchmark/sql/non_pk_lookup.sql",
+             data_dir);
+    snprintf(original_users_csv_path, sizeof(original_users_csv_path), "%s/users.csv", data_dir);
+
+    memset(&config, 0, sizeof(config));
+    snprintf(config.schema_dir, sizeof(config.schema_dir), "%s", schema_dir);
+    snprintf(config.data_dir, sizeof(config.data_dir), "%s", data_dir);
+    config.benchmark_mode = 1;
+
+    if (!capture_run_program_with_input(&config,
+                                        "abc\n0\n100\n.exit\n",
+                                        output_path)) {
+        return 0;
+    }
+
+    if (count_text_occurrences(output_path,
+                               ">> 벤치마크를 위한 더미 데이터는 몇 개를 생성하시겠습니까? : ") != 3) {
+        return 0;
+    }
+
+    if (count_text_occurrences(output_path, "양의 정수를 입력해 주세요.\n") != 2) {
+        return 0;
+    }
+
+    if (!file_contains_text(output_path, "PK (id, cold)") ||
+        !file_contains_text(output_path, "PK (id, warm)") ||
+        !file_contains_text(output_path, "not PK (name)") ||
+        !file_contains_text(output_path, "sqlproc interactive mode\n") ||
+        !file_contains_text(output_path, "sqlproc> ")) {
+        return 0;
+    }
+
+    if (!path_exists(benchmark_schema_path) ||
+        !path_exists(benchmark_csv_path) ||
+        !path_exists(benchmark_pk_sql_path) ||
+        !path_exists(benchmark_non_pk_sql_path)) {
+        return 0;
+    }
+
+    return !path_exists(original_users_csv_path);
+}
+
 int main(void)
 {
     if (!test_parse_arguments_success()) {
@@ -1635,6 +1894,21 @@ int main(void)
 
     if (!test_parse_arguments_fail()) {
         fprintf(stderr, "test_parse_arguments_fail failed\n");
+        return 1;
+    }
+
+    if (!test_parse_arguments_benchmark_short_success()) {
+        fprintf(stderr, "test_parse_arguments_benchmark_short_success failed\n");
+        return 1;
+    }
+
+    if (!test_parse_arguments_benchmark_long_success()) {
+        fprintf(stderr, "test_parse_arguments_benchmark_long_success failed\n");
+        return 1;
+    }
+
+    if (!test_parse_arguments_reject_mixed_modes()) {
+        fprintf(stderr, "test_parse_arguments_reject_mixed_modes failed\n");
         return 1;
     }
 
@@ -1795,6 +2069,11 @@ int main(void)
 
     if (!test_load_schema_without_id_has_no_primary_key()) {
         fprintf(stderr, "test_load_schema_without_id_has_no_primary_key failed\n");
+        return 1;
+    }
+
+    if (!test_run_program_benchmark_mode()) {
+        fprintf(stderr, "test_run_program_benchmark_mode failed\n");
         return 1;
     }
 
