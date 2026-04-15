@@ -37,6 +37,25 @@ static int create_temp_workspace(char *base_path,
                                  size_t data_size,
                                  const char *prefix);
 static int parse_sql_text(const char *sql_text, SqlProgram *program, ErrorInfo *error);
+static int make_temp_directory(char *path_template);
+
+/* mkdtemp 선언 가용성에 기대지 않고, 고유한 임시 경로를 디렉터리로 바꿉니다. */
+static int make_temp_directory(char *path_template)
+{
+    int file_descriptor;
+
+    file_descriptor = mkstemp(path_template);
+    if (file_descriptor < 0) {
+        return 0;
+    }
+
+    close(file_descriptor);
+    if (unlink(path_template) != 0) {
+        return 0;
+    }
+
+    return mkdir(path_template, 0700) == 0;
+}
 
 static int test_parse_arguments_success(void)
 {
@@ -434,7 +453,7 @@ static int create_temp_workspace(char *base_path,
 {
     /* 각 테스트가 서로 간섭하지 않도록 /tmp 아래에 독립 워크스페이스를 만듭니다. */
     snprintf(base_path, base_size, "/tmp/%sXXXXXX", prefix);
-    if (mkdtemp(base_path) == NULL) {
+    if (!make_temp_directory(base_path)) {
         return 0;
     }
 
