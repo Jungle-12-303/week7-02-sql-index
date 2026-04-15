@@ -134,6 +134,97 @@ flowchart TD
 - 실제 CSV 위치 정보는 leaf의 `offsets[]`에만 저장
 - range scan은 `next`를 따라 leaf를 왼쪽에서 오른쪽으로 순회
 
+### 실제 CSV 데이터를 넣었을 때의 노드 스냅샷
+
+위 그림이 원리 설명용 예시였다면, 아래는 현재 benchmark sample CSV의
+첫 10개 row를 현재 구현으로 인덱싱했을 때의 구조를 정리한 것입니다.
+즉 "항상 이 모양이 나온다"는 뜻이 아니라, 현재 `BPTREE_ORDER = 4` 설정과
+파일 순서대로 삽입된 결과를 그대로 그린 스냅샷입니다.
+
+이 파일은 아래처럼 저장되어 있고, 현재 구현은 각 row가 시작하는 위치를
+`ftell()`로 구해 leaf의 `offsets[]`에 넣습니다. 여기서 `offset`은
+행 번호가 아니라 "파일 시작 기준 byte offset"입니다.
+
+| id | CSV row | row offset (`ftell()` byte offset) |
+| --- | --- | --- |
+| 1 | `1,user1,21` | `12` |
+| 2 | `2,user2,22` | `23` |
+| 3 | `3,user3,23` | `34` |
+| 4 | `4,user4,24` | `45` |
+| 5 | `5,user5,25` | `56` |
+| 6 | `6,user6,26` | `67` |
+| 7 | `7,user7,27` | `78` |
+| 8 | `8,user8,28` | `89` |
+| 9 | `9,user9,29` | `100` |
+| 10 | `10,user10,30` | `111` |
+
+`BPTREE_ORDER = 4`인 현재 구현에 위 데이터를 순서대로 넣으면, 10번째 row가
+들어갈 때 root split이 한 번 더 발생해서 트리는 아래처럼
+`root -> internal -> leaf` 3단 구조가 됩니다.
+
+```mermaid
+flowchart TD
+    Root["root<br/>is_leaf = 0<br/>key_count = 1<br/>keys = [7]"]
+    ILeft["internal A<br/>is_leaf = 0<br/>key_count = 2<br/>keys = [3 | 5]"]
+    IRight["internal B<br/>is_leaf = 0<br/>key_count = 1<br/>keys = [9]"]
+
+    L12["leaf L1<br/>is_leaf = 1<br/>key_count = 2<br/>keys = [1 | 2]<br/>offsets = [12 | 23]"]
+    L34["leaf L2<br/>is_leaf = 1<br/>key_count = 2<br/>keys = [3 | 4]<br/>offsets = [34 | 45]"]
+    L56["leaf L3<br/>is_leaf = 1<br/>key_count = 2<br/>keys = [5 | 6]<br/>offsets = [56 | 67]"]
+    L78["leaf L4<br/>is_leaf = 1<br/>key_count = 2<br/>keys = [7 | 8]<br/>offsets = [78 | 89]"]
+    L910["leaf L5<br/>is_leaf = 1<br/>key_count = 2<br/>keys = [9 | 10]<br/>offsets = [100 | 111]"]
+
+    Root -->|"children[0]"| ILeft
+    Root -->|"children[1]"| IRight
+
+    ILeft -->|"children[0]"| L12
+    ILeft -->|"children[1]"| L34
+    ILeft -->|"children[2]"| L56
+
+    IRight -->|"children[0]"| L78
+    IRight -->|"children[1]"| L910
+
+    L12 -. "next" .-> L34
+    L34 -. "next" .-> L56
+    L56 -. "next" .-> L78
+    L78 -. "next" .-> L910
+
+    classDef internal fill:#eef4ff,stroke:#3568a8,color:#1a1a1a;
+    classDef leaf fill:#eefaf0,stroke:#2f7d46,color:#1a1a1a;
+    class Root,ILeft,IRight internal;
+    class L12,L34,L56,L78,L910 leaf;
+```
+
+이 그림을 코드 필드 기준으로 읽으면 아래와 같습니다.
+
+- `is_leaf = 0`인 노드는 `keys[]`와 `children[]`만 갖고, `offsets[]`는 없습니다.
+- `is_leaf = 1`인 노드는 실제 `id -> offset` 쌍을 들고 있고, 오른쪽 leaf를
+  가리키는 `next`도 함께 가집니다.
+- `key_count = 2`라는 말은 해당 노드에서 현재 유효한 key가 2개라는 뜻입니다.
+- `root`의 `keys = [7]`은 `1~6`은 왼쪽, `7~10`은 오른쪽 서브트리로 내려가라는
+  경계값입니다.
+- `internal A`의 `keys = [3 | 5]`는 왼쪽 subtree가 `[1 | 2]`, 가운데 subtree가
+  `[3 | 4]`, 오른쪽 subtree가 `[5 | 6]`을 담당한다는 뜻입니다.
+- `internal A`, `internal B`는 코드에 실제로 있는 이름이 아니라, 그림에서
+  각 internal node를 구분하기 위해 붙인 도식용 라벨입니다.
+
+### 실제 데이터가 leaf에 어떻게 묶이는지
+
+위 트리를 leaf 기준으로 옆으로 펼치면 아래처럼 읽을 수 있습니다.
+이 그림은 range scan이 왜 `next` 포인터만 따라가면 되는지 보여줍니다.
+
+```mermaid
+flowchart LR
+    L12["L1<br/>keys = [1 | 2]<br/>offsets = [12 | 23]"] -. "next" .-> L34["L2<br/>keys = [3 | 4]<br/>offsets = [34 | 45]"]
+    L34 -. "next" .-> L56["L3<br/>keys = [5 | 6]<br/>offsets = [56 | 67]"]
+    L56 -. "next" .-> L78["L4<br/>keys = [7 | 8]<br/>offsets = [78 | 89]"]
+    L78 -. "next" .-> L910["L5<br/>keys = [9 | 10]<br/>offsets = [100 | 111]"]
+```
+
+예를 들어 `WHERE id > 6`이면, 먼저 `6`이 들어갈 leaf까지 내려간 뒤
+그 leaf 안에서 `6`보다 큰 key부터 읽고, 이후에는 `next`를 따라
+`[7 | 8]`, `[9 | 10]` leaf만 계속 방문하면 됩니다.
+
 ## 코드 구조
 
 핵심 구조체는 [src/bptree.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/bptree.c:8) 에 있습니다.
