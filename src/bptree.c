@@ -5,14 +5,28 @@
 
 #define BPTREE_MAX_KEYS (BPTREE_ORDER - 1)
 
-typedef struct BPlusTreeNode {
+typedef struct BPlusTreeNode BPlusTreeNode;
+
+typedef struct {
+    long offsets[BPTREE_MAX_KEYS];
+    BPlusTreeNode *next;
+} BPlusTreeLeafData;
+
+typedef struct {
+    BPlusTreeNode *children[BPTREE_ORDER];
+} BPlusTreeInternalData;
+
+typedef union {
+    BPlusTreeLeafData leaf;
+    BPlusTreeInternalData internal;
+} BPlusTreeNodeData;
+
+struct BPlusTreeNode {
     int is_leaf;
     int key_count;
     int keys[BPTREE_MAX_KEYS];
-    long offsets[BPTREE_MAX_KEYS];
-    struct BPlusTreeNode *children[BPTREE_ORDER];
-    struct BPlusTreeNode *next;
-} BPlusTreeNode;
+    BPlusTreeNodeData data;
+};
 
 struct BPlusTree {
     BPlusTreeNode *root;
@@ -49,7 +63,7 @@ static void destroy_node(BPlusTreeNode *node)
 
     if (!node->is_leaf) {
         for (i = 0; i <= node->key_count; i++) {
-            destroy_node(node->children[i]);
+            destroy_node(node->data.internal.children[i]);
         }
     }
 
@@ -107,11 +121,11 @@ static void insert_leaf_without_split(BPlusTreeNode *leaf,
 
     for (i = leaf->key_count; i > position; i--) {
         leaf->keys[i] = leaf->keys[i - 1];
-        leaf->offsets[i] = leaf->offsets[i - 1];
+        leaf->data.leaf.offsets[i] = leaf->data.leaf.offsets[i - 1];
     }
 
     leaf->keys[position] = key;
-    leaf->offsets[position] = offset;
+    leaf->data.leaf.offsets[position] = offset;
     leaf->key_count += 1;
 }
 
@@ -139,7 +153,7 @@ static InsertResult split_leaf_and_insert(BPlusTreeNode *leaf,
 
     for (i = 0; i < insert_position; i++) {
         temp_keys[i] = leaf->keys[i];
-        temp_offsets[i] = leaf->offsets[i];
+        temp_offsets[i] = leaf->data.leaf.offsets[i];
     }
 
     temp_keys[insert_position] = key;
@@ -147,7 +161,7 @@ static InsertResult split_leaf_and_insert(BPlusTreeNode *leaf,
 
     for (i = insert_position; i < leaf->key_count; i++) {
         temp_keys[i + 1] = leaf->keys[i];
-        temp_offsets[i + 1] = leaf->offsets[i];
+        temp_offsets[i + 1] = leaf->data.leaf.offsets[i];
     }
 
     total_count = leaf->key_count + 1;
@@ -156,17 +170,17 @@ static InsertResult split_leaf_and_insert(BPlusTreeNode *leaf,
     leaf->key_count = split_index;
     for (i = 0; i < leaf->key_count; i++) {
         leaf->keys[i] = temp_keys[i];
-        leaf->offsets[i] = temp_offsets[i];
+        leaf->data.leaf.offsets[i] = temp_offsets[i];
     }
 
     right->key_count = total_count - split_index;
     for (i = 0; i < right->key_count; i++) {
         right->keys[i] = temp_keys[split_index + i];
-        right->offsets[i] = temp_offsets[split_index + i];
+        right->data.leaf.offsets[i] = temp_offsets[split_index + i];
     }
 
-    right->next = leaf->next;
-    leaf->next = right;
+    right->data.leaf.next = leaf->data.leaf.next;
+    leaf->data.leaf.next = right;
 
     result.split = 1;
     result.promoted_key = right->keys[0];
@@ -206,11 +220,11 @@ static void insert_internal_without_split(BPlusTreeNode *node,
     }
 
     for (i = node->key_count + 1; i > position + 1; i--) {
-        node->children[i] = node->children[i - 1];
+        node->data.internal.children[i] = node->data.internal.children[i - 1];
     }
 
     node->keys[position] = promoted_key;
-    node->children[position + 1] = right_child;
+    node->data.internal.children[position + 1] = right_child;
     node->key_count += 1;
 }
 
@@ -241,7 +255,7 @@ static InsertResult split_internal_and_insert(BPlusTreeNode *node,
     }
 
     for (i = 0; i <= node->key_count; i++) {
-        temp_children[i] = node->children[i];
+        temp_children[i] = node->data.internal.children[i];
     }
 
     for (i = node->key_count; i > position; i--) {
@@ -262,7 +276,7 @@ static InsertResult split_internal_and_insert(BPlusTreeNode *node,
         node->keys[i] = temp_keys[i];
     }
     for (i = 0; i <= node->key_count; i++) {
-        node->children[i] = temp_children[i];
+        node->data.internal.children[i] = temp_children[i];
     }
 
     right->key_count = total_keys - split_index - 1;
@@ -270,7 +284,7 @@ static InsertResult split_internal_and_insert(BPlusTreeNode *node,
         right->keys[i] = temp_keys[split_index + 1 + i];
     }
     for (i = 0; i <= right->key_count; i++) {
-        right->children[i] = temp_children[split_index + 1 + i];
+        right->data.internal.children[i] = temp_children[split_index + 1 + i];
     }
 
     result.split = 1;
@@ -289,7 +303,9 @@ static InsertResult insert_recursive(BPlusTreeNode *node, int key, long offset)
     }
 
     child_position = find_child_position(node, key);
-    child_result = insert_recursive(node->children[child_position], key, offset);
+    child_result = insert_recursive(node->data.internal.children[child_position],
+                                    key,
+                                    offset);
     if (!child_result.split || child_result.duplicate || child_result.failed) {
         return child_result;
     }
@@ -338,8 +354,8 @@ int bptree_insert(BPlusTree *tree, int key, long offset)
         }
 
         new_root->keys[0] = result.promoted_key;
-        new_root->children[0] = tree->root;
-        new_root->children[1] = result.right_node;
+        new_root->data.internal.children[0] = tree->root;
+        new_root->data.internal.children[1] = result.right_node;
         new_root->key_count = 1;
         tree->root = new_root;
     }
@@ -359,7 +375,7 @@ int bptree_search(const BPlusTree *tree, int key, long *out_offset)
     node = tree->root;
     while (!node->is_leaf) {
         position = find_child_position(node, key);
-        node = node->children[position];
+        node = node->data.internal.children[position];
     }
 
     position = find_leaf_position(node, key);
@@ -368,7 +384,7 @@ int bptree_search(const BPlusTree *tree, int key, long *out_offset)
     }
 
     if (out_offset != NULL) {
-        *out_offset = node->offsets[position];
+        *out_offset = node->data.leaf.offsets[position];
     }
 
     return 1;
@@ -384,7 +400,7 @@ static const BPlusTreeNode *leftmost_leaf(const BPlusTree *tree)
 
     node = tree->root;
     while (!node->is_leaf) {
-        node = node->children[0];
+        node = node->data.internal.children[0];
     }
 
     return node;
@@ -402,7 +418,7 @@ static const BPlusTreeNode *find_leaf(const BPlusTree *tree, int key)
     node = tree->root;
     while (!node->is_leaf) {
         position = find_child_position(node, key);
-        node = node->children[position];
+        node = node->data.internal.children[position];
     }
 
     return node;
@@ -433,12 +449,12 @@ int bptree_visit_greater_than(const BPlusTree *tree,
 
     while (node != NULL) {
         for (i = position; i < node->key_count; i++) {
-            if (!visit(node->keys[i], node->offsets[i], user_data)) {
+            if (!visit(node->keys[i], node->data.leaf.offsets[i], user_data)) {
                 return 0;
             }
         }
 
-        node = node->next;
+        node = node->data.leaf.next;
         position = 0;
     }
 
@@ -464,12 +480,12 @@ int bptree_visit_less_than(const BPlusTree *tree,
                 return 1;
             }
 
-            if (!visit(node->keys[i], node->offsets[i], user_data)) {
+            if (!visit(node->keys[i], node->data.leaf.offsets[i], user_data)) {
                 return 0;
             }
         }
 
-        node = node->next;
+        node = node->data.leaf.next;
     }
 
     return 1;
