@@ -13,7 +13,7 @@
  * - SELECT: 선택 컬럼을 계산한 뒤 스토리지에 조회 출력을 요청합니다.
  */
 
-#define EXECUTOR_MAX_TABLE_STATES 32
+#define EXECUTOR_MAX_TABLE_STATES 128
 
 typedef struct {
     int in_use;
@@ -570,6 +570,18 @@ static int execute_select_with_index(const AppConfig *config,
     int target_id;
     long row_offset;
 
+    /*
+     * WHERE id = ? 전용 실행 경로입니다.
+     *
+     * 이 함수에 들어왔다는 것은 execute_select()에서 이미
+     * "WHERE 대상 컬럼이 PK(id)이고, 연산자가 = 이다"라고 판단했다는 뜻입니다.
+     *
+     * 목표:
+     * 1. WHERE 오른쪽 값을 int로 바꾼다.
+     * 2. 현재 테이블의 B+ Tree 상태를 가져온다.
+     * 3. B+ Tree에서 id를 찾아 CSV row offset을 얻는다.
+     * 4. offset으로 CSV 한 줄만 읽어 출력한다.
+     */
     if (!parse_where_int_value(&statement->where_value, &target_id)) {
         set_runtime_error(error,
                           "정수 값이 int 범위를 벗어났습니다.",
@@ -577,19 +589,33 @@ static int execute_select_with_index(const AppConfig *config,
         return 0;
     }
 
+    /*
+     * table_states[]에서 현재 테이블 상태 위치를 찾습니다.
+     * 없으면 여기서 CSV를 한 번 읽어 B+ Tree를 재구성합니다.
+     */
     state_index = get_table_state_index(config, schema, error);
     if (state_index < 0) {
         return 0;
     }
 
+    /* 발표/디버깅용 로그입니다. 이 조회가 인덱스를 탔다는 뜻입니다. */
     printf("[INDEX] WHERE %s = %s\n",
            statement->where_column,
            statement->where_value.text);
 
+    /*
+     * B+ Tree에는 id -> CSV row offset만 저장되어 있습니다.
+     * 검색 성공: row_offset에 해당 row 시작 byte 위치가 들어갑니다.
+     * 검색 실패: row_offset을 -1로 두고, 헤더만 출력하게 합니다.
+     */
     if (!bptree_search(table_states[state_index].pk_index, target_id, &row_offset)) {
         row_offset = -1;
     }
 
+    /*
+     * CSV 전체를 훑지 않고, 찾은 offset으로 바로 fseek합니다.
+     * selected_indices는 SELECT * 또는 SELECT name, age 같은 출력 컬럼 목록입니다.
+     */
     return storage_print_row_at_offset(config,
                                        schema,
                                        row_offset,
@@ -658,6 +684,13 @@ static int execute_select_with_index_range(const AppConfig *config,
     int target_id;
     int ok;
 
+    /*
+     * WHERE id > ? / WHERE id < ? 전용 실행 경로입니다.
+     *
+     * 단건 검색과 다르게 결과 row가 여러 개일 수 있습니다.
+     * 그래서 B+ Tree leaf node를 따라가며 조건에 맞는 row offset들을
+     * OffsetList에 모은 뒤, 그 offset 목록을 순서대로 출력합니다.
+     */
     if (!parse_where_int_value(&statement->where_value, &target_id)) {
         set_runtime_error(error,
                           "정수 값이 int 범위를 벗어났습니다.",
@@ -665,18 +698,36 @@ static int execute_select_with_index_range(const AppConfig *config,
         return 0;
     }
 
+    /*
+     * 현재 테이블의 런타임 상태를 가져옵니다.
+     * 최초 PK range 조회라면 이 시점에 CSV -> B+ Tree 재구성이 일어납니다.
+     */
     state_index = get_table_state_index(config, schema, error);
     if (state_index < 0) {
         return 0;
     }
 
+    /*
+     * append_offset() 콜백이 결과 offset을 동적으로 담을 수 있도록
+     * 비어 있는 목록으로 초기화합니다.
+     */
     memset(&offsets, 0, sizeof(offsets));
     if (statement->where_operator == WHERE_OP_GREATER) {
+        /*
+         * id > target:
+         * target이 들어갈 leaf를 찾은 뒤, 그 다음 key부터 오른쪽 leaf(next)를
+         * 따라가며 offset을 수집합니다.
+         */
         ok = bptree_visit_greater_than(table_states[state_index].pk_index,
                                        target_id,
                                        append_offset,
                                        &offsets);
     } else {
+        /*
+         * id < target:
+         * 가장 왼쪽 leaf부터 시작해서 target보다 작은 key까지만
+         * offset을 수집합니다.
+         */
         ok = bptree_visit_less_than(table_states[state_index].pk_index,
                                     target_id,
                                     append_offset,
@@ -689,12 +740,17 @@ static int execute_select_with_index_range(const AppConfig *config,
         return 0;
     }
 
+    /* range scan을 탔고, 몇 개 row가 선택됐는지 보여 주는 로그입니다. */
     printf("[INDEX-RANGE] WHERE %s %s %s (%d rows)\n",
            statement->where_column,
            where_operator_text(statement->where_operator),
            statement->where_value.text,
            offsets.count);
 
+    /*
+     * B+ Tree에서 모은 offset 목록을 이용해 CSV row들을 읽습니다.
+     * 여기서도 CSV 전체 scan이 아니라, 필요한 row 위치들로 fseek합니다.
+     */
     ok = storage_print_rows_at_offsets(config,
                                        schema,
                                        offsets.offsets,
@@ -702,6 +758,7 @@ static int execute_select_with_index_range(const AppConfig *config,
                                        selected_indices,
                                        selected_count,
                                        error);
+    /* append_offset()에서 realloc으로 확보한 목록 메모리를 해제합니다. */
     free(offsets.offsets);
     return ok;
 }
