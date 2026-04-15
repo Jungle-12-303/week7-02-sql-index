@@ -21,6 +21,8 @@
 
 static int ensure_directory(const char *path);
 static int write_text_file(const char *path, const char *text);
+static int write_generated_users_csv(const char *path, int record_count);
+static int read_first_two_elapsed_ms(const char *path, double *first_ms, double *second_ms);
 static int file_contains_text(const char *path, const char *needle);
 static int capture_run_program(const AppConfig *config, const char *output_path);
 static int capture_storage_print_rows(const AppConfig *config,
@@ -352,6 +354,69 @@ static int write_text_file(const char *path, const char *text)
     fputs(text, file);
     fclose(file);
     return 1;
+}
+
+static int write_generated_users_csv(const char *path, int record_count)
+{
+    FILE *file;
+    int i;
+
+    /* indexed SELECT 성능 회귀 테스트용으로 큰 users.csv를 빠르게 만듭니다. */
+    file = fopen(path, "wb");
+    if (file == NULL) {
+        return 0;
+    }
+
+    if (fputs("id,name,age\n", file) == EOF) {
+        fclose(file);
+        return 0;
+    }
+
+    for (i = 1; i <= record_count; i++) {
+        if (fprintf(file, "%d,user%d,%d\n", i, i, 20 + (i % 50)) < 0) {
+            fclose(file);
+            return 0;
+        }
+    }
+
+    fclose(file);
+    return 1;
+}
+
+static int read_first_two_elapsed_ms(const char *path, double *first_ms, double *second_ms)
+{
+    FILE *file;
+    char line[256];
+    double value;
+    int found_count;
+
+    file = fopen(path, "rb");
+    if (file == NULL) {
+        return 0;
+    }
+
+    *first_ms = 0.0;
+    *second_ms = 0.0;
+    found_count = 0;
+
+    while (fgets(line, sizeof(line), file) != NULL) {
+        if (sscanf(line, "elapsed: %lf ms", &value) != 1) {
+            continue;
+        }
+
+        if (found_count == 0) {
+            *first_ms = value;
+        } else {
+            *second_ms = value;
+            fclose(file);
+            return 1;
+        }
+
+        found_count += 1;
+    }
+
+    fclose(file);
+    return 0;
 }
 
 static int file_contains_text(const char *path, const char *needle)
@@ -1285,6 +1350,183 @@ static int test_insert_formula_like_string_fail(void)
     return error.line == 1 && error.column == 30;
 }
 
+static int test_select_allows_max_width_row(void)
+{
+    AppConfig config;
+    char base_dir[256];
+    char schema_dir[256];
+    char data_dir[256];
+    char schema_path[512];
+    char sql_path[256];
+    char output_path[512];
+    char long_value[SQLPROC_MAX_VALUE_LEN];
+    FILE *schema_file;
+    FILE *sql_file;
+    int i;
+
+    if (!create_temp_workspace(base_dir,
+                               sizeof(base_dir),
+                               schema_dir,
+                               sizeof(schema_dir),
+                               data_dir,
+                               sizeof(data_dir),
+                               "sqlproc_max_width_row_")) {
+        return 0;
+    }
+
+    memset(long_value, 'a', SQLPROC_MAX_VALUE_LEN - 1);
+    long_value[SQLPROC_MAX_VALUE_LEN - 1] = '\0';
+
+    snprintf(schema_path, sizeof(schema_path), "%s/wide.schema", schema_dir);
+    snprintf(sql_path, sizeof(sql_path), "%s/input.sql", base_dir);
+    snprintf(output_path, sizeof(output_path), "%s/output.txt", base_dir);
+
+    schema_file = fopen(schema_path, "wb");
+    if (schema_file == NULL) {
+        return 0;
+    }
+
+    for (i = 0; i < SQLPROC_MAX_COLUMNS; i++) {
+        if (fprintf(schema_file,
+                    "c%d:string%s",
+                    i + 1,
+                    i + 1 == SQLPROC_MAX_COLUMNS ? "\n" : ",") < 0) {
+            fclose(schema_file);
+            return 0;
+        }
+    }
+
+    fclose(schema_file);
+
+    sql_file = fopen(sql_path, "wb");
+    if (sql_file == NULL) {
+        return 0;
+    }
+
+    if (fputs("INSERT INTO wide VALUES (", sql_file) == EOF) {
+        fclose(sql_file);
+        return 0;
+    }
+
+    for (i = 0; i < SQLPROC_MAX_COLUMNS; i++) {
+        if (fprintf(sql_file,
+                    "'%s'%s",
+                    long_value,
+                    i + 1 == SQLPROC_MAX_COLUMNS ? "" : ", ") < 0) {
+            fclose(sql_file);
+            return 0;
+        }
+    }
+
+    if (fputs(");\nSELECT * FROM wide;\n", sql_file) == EOF) {
+        fclose(sql_file);
+        return 0;
+    }
+
+    fclose(sql_file);
+
+    memset(&config, 0, sizeof(config));
+    snprintf(config.schema_dir, sizeof(config.schema_dir), "%s", schema_dir);
+    snprintf(config.data_dir, sizeof(config.data_dir), "%s", data_dir);
+    snprintf(config.input_path, sizeof(config.input_path), "%s", sql_path);
+
+    if (!capture_run_program(&config, output_path)) {
+        return 0;
+    }
+
+    return file_contains_text(output_path, "c1\tc2\tc3") &&
+           file_contains_text(output_path, long_value);
+}
+
+static int test_load_schema_duplicate_column_fail(void)
+{
+    TableSchema schema;
+    ErrorInfo error;
+    char base_dir[256];
+    char schema_dir[256];
+    char data_dir[256];
+    char schema_path[512];
+
+    if (!create_temp_workspace(base_dir,
+                               sizeof(base_dir),
+                               schema_dir,
+                               sizeof(schema_dir),
+                               data_dir,
+                               sizeof(data_dir),
+                               "sqlproc_schema_duplicate_")) {
+        return 0;
+    }
+
+    snprintf(schema_path, sizeof(schema_path), "%s/weird.schema", schema_dir);
+    if (!write_text_file(schema_path, "id:int,id:int,name:string\n")) {
+        return 0;
+    }
+
+    if (load_table_schema(schema_dir, "weird", &schema, &error)) {
+        return 0;
+    }
+
+    return strstr(error.message, "스키마 컬럼 이름이 중복됩니다.") != NULL;
+}
+
+static int test_first_index_select_elapsed_includes_rebuild(void)
+{
+    AppConfig config;
+    char base_dir[256];
+    char schema_dir[256];
+    char data_dir[256];
+    char schema_path[512];
+    char data_path[512];
+    char sql_path[256];
+    char output_path[512];
+    double first_ms;
+    double second_ms;
+
+    if (!create_temp_workspace(base_dir,
+                               sizeof(base_dir),
+                               schema_dir,
+                               sizeof(schema_dir),
+                               data_dir,
+                               sizeof(data_dir),
+                               "sqlproc_index_elapsed_")) {
+        return 0;
+    }
+
+    snprintf(schema_path, sizeof(schema_path), "%s/users.schema", schema_dir);
+    snprintf(data_path, sizeof(data_path), "%s/users.csv", data_dir);
+    snprintf(sql_path, sizeof(sql_path), "%s/input.sql", base_dir);
+    snprintf(output_path, sizeof(output_path), "%s/output.txt", base_dir);
+
+    if (!write_text_file(schema_path, "id:int,name:string,age:int\n")) {
+        return 0;
+    }
+
+    if (!write_generated_users_csv(data_path, 50000)) {
+        return 0;
+    }
+
+    if (!write_text_file(sql_path,
+                         "SELECT * FROM users WHERE id = 50000;\n"
+                         "SELECT * FROM users WHERE id = 50000;\n")) {
+        return 0;
+    }
+
+    memset(&config, 0, sizeof(config));
+    snprintf(config.schema_dir, sizeof(config.schema_dir), "%s", schema_dir);
+    snprintf(config.data_dir, sizeof(config.data_dir), "%s", data_dir);
+    snprintf(config.input_path, sizeof(config.input_path), "%s", sql_path);
+
+    if (!capture_run_program(&config, output_path)) {
+        return 0;
+    }
+
+    if (!read_first_two_elapsed_ms(output_path, &first_ms, &second_ms)) {
+        return 0;
+    }
+
+    return first_ms > second_ms + 1.0;
+}
+
 static int test_load_schema_long_column_name_fail(void)
 {
     TableSchema schema;
@@ -1526,8 +1768,23 @@ int main(void)
         return 1;
     }
 
+    if (!test_select_allows_max_width_row()) {
+        fprintf(stderr, "test_select_allows_max_width_row failed\n");
+        return 1;
+    }
+
+    if (!test_first_index_select_elapsed_includes_rebuild()) {
+        fprintf(stderr, "test_first_index_select_elapsed_includes_rebuild failed\n");
+        return 1;
+    }
+
     if (!test_load_schema_long_column_name_fail()) {
         fprintf(stderr, "test_load_schema_long_column_name_fail failed\n");
+        return 1;
+    }
+
+    if (!test_load_schema_duplicate_column_fail()) {
+        fprintf(stderr, "test_load_schema_duplicate_column_fail failed\n");
         return 1;
     }
 

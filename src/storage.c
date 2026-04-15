@@ -13,7 +13,7 @@
  */
 
 #define STORAGE_MAX_PATH_LEN 512
-#define STORAGE_MAX_ROW_LEN 1024
+#define STORAGE_MAX_ROW_LEN SQLPROC_MAX_CSV_ROW_LEN
 
 static void set_file_error(ErrorInfo *error, const char *message)
 {

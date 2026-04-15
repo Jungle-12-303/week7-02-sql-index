@@ -46,13 +46,26 @@ static int parse_data_type(const char *text, DataType *data_type)
     return 0;
 }
 
+static int has_duplicate_column_name(const TableSchema *schema, const char *name)
+{
+    int i;
+
+    for (i = 0; i < schema->column_count; i++) {
+        if (strcmp(schema->columns[i].name, name) == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 int load_table_schema(const char *schema_dir,
                       const char *table_name,
                       TableSchema *schema,
                       ErrorInfo *error)
 {
     char path[512];
-    char line[1024];
+    char line[SQLPROC_MAX_SCHEMA_LINE_LEN];
     char *entry;
     char *cursor;
     FILE *file;
@@ -129,6 +142,11 @@ int load_table_schema(const char *schema_dir,
 
         if (lower_name[0] == '\0') {
             set_error(error, "스키마 컬럼 이름이 비어 있습니다.");
+            return 0;
+        }
+
+        if (has_duplicate_column_name(schema, lower_name)) {
+            set_error(error, "스키마 컬럼 이름이 중복됩니다.");
             return 0;
         }
 
