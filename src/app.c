@@ -17,33 +17,55 @@ static int run_sql_text(const AppConfig *config, const char *sql_text, ErrorInfo
 int parse_arguments(int argc, char **argv, AppConfig *config)
 {
     int i;
-
-    /*
-     * 지원하는 실행 형식:
-     *   ./sqlproc --schema-dir <dir> --data-dir <dir> <input.sql>
-     *   ./sqlproc --schema-dir <dir> --data-dir <dir> --interactive
-     *   -> argc == 6
-     */
-    if (argc != 6) {
-        return 0;
-    }
+    int has_input_path;
+    int mode_count;
 
     /*
      * 이전 실행 값이 남지 않도록 config 전체를 0으로 초기화합니다.
      */
     memset(config, 0, sizeof(*config));
+    has_input_path = 0;
+    mode_count = 0;
 
     /*
-     * argv는 "--옵션 값" 쌍으로 들어오므로 2칸씩 전진합니다.
-     * 마지막 인자(argv[5])는 SQL 파일 경로입니다.
+     * 지원하는 실행 형식:
+     *   ./sqlproc --schema-dir <dir> --data-dir <dir> <input.sql>
+     *   ./sqlproc --schema-dir <dir> --data-dir <dir> --interactive
+     *   ./sqlproc --schema-dir <dir> --data-dir <dir> --benchmark
+     *
+     * 옵션 순서가 조금 달라도 읽을 수 있도록 argv 전체를 왼쪽부터 검사합니다.
      */
-    for (i = 1; i < argc - 1; i += 2) {
+    for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--schema-dir") == 0) {
+            if (i + 1 >= argc) {
+                return 0;
+            }
+
             snprintf(config->schema_dir, sizeof(config->schema_dir), "%s", argv[i + 1]);
+            i += 1;
         } else if (strcmp(argv[i], "--data-dir") == 0) {
+            if (i + 1 >= argc) {
+                return 0;
+            }
+
             snprintf(config->data_dir, sizeof(config->data_dir), "%s", argv[i + 1]);
-        } else {
+            i += 1;
+        } else if (strcmp(argv[i], "--interactive") == 0) {
+            config->interactive_mode = 1;
+            mode_count += 1;
+        } else if (strcmp(argv[i], "-b") == 0 ||
+                   strcmp(argv[i], "--benchmark") == 0) {
+            config->benchmark_mode = 1;
+            mode_count += 1;
+        } else if (argv[i][0] == '-') {
             return 0;
+        } else {
+            if (has_input_path) {
+                return 0;
+            }
+
+            snprintf(config->input_path, sizeof(config->input_path), "%s", argv[i]);
+            has_input_path = 1;
         }
     }
 
@@ -54,13 +76,19 @@ int parse_arguments(int argc, char **argv, AppConfig *config)
         return 0;
     }
 
-    if (strcmp(argv[argc - 1], "--interactive") == 0) {
-        config->interactive_mode = 1;
-    } else {
-        snprintf(config->input_path, sizeof(config->input_path), "%s", argv[argc - 1]);
+    if (mode_count > 1) {
+        return 0;
     }
 
-    return 1;
+    if (has_input_path && mode_count > 0) {
+        return 0;
+    }
+
+    if (!has_input_path && mode_count == 0) {
+        return 0;
+    }
+
+    return !has_input_path || config->input_path[0] != '\0';
 }
 
 int load_sql_file(const char *path, char *buffer, size_t buffer_size, ErrorInfo *error)
@@ -216,24 +244,35 @@ static int run_interactive_program(const AppConfig *config)
     }
 }
 
-int run_program(const AppConfig *config)
+int run_sql_file(const AppConfig *config, const char *path, ErrorInfo *error)
 {
     char sql_text[SQLPROC_MAX_SQL_SIZE];
+
+    if (!load_sql_file(path, sql_text, sizeof(sql_text), error)) {
+        return 0;
+    }
+
+    return run_sql_text(config, sql_text, error);
+}
+
+int run_program(const AppConfig *config)
+{
     ErrorInfo error;
+
+    if (config->benchmark_mode) {
+        if (!run_benchmark_mode(config, &error)) {
+            print_error(&error);
+            return 1;
+        }
+
+        return run_interactive_program(config);
+    }
 
     if (config->interactive_mode) {
         return run_interactive_program(config);
     }
 
-    /*
-     * SQL 파일을 읽어 한 번 실행합니다.
-     */
-    if (!load_sql_file(config->input_path, sql_text, sizeof(sql_text), &error)) {
-        print_error(&error);
-        return 1;
-    }
-
-    if (!run_sql_text(config, sql_text, &error)) {
+    if (!run_sql_file(config, config->input_path, &error)) {
         print_error(&error);
         return 1;
     }

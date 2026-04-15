@@ -53,8 +53,8 @@ test: $(TEST_APP)
 $(BENCH_INDEX): $(BUILD_DIR)/bptree.o $(BENCH_OBJS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -o $@ $(BUILD_DIR)/bptree.o $(BENCH_OBJS)
 
-bench: $(BENCH_INDEX)
-	./$(BENCH_INDEX)
+bench: $(APP)
+	./$(APP) --schema-dir ./examples/schemas --data-dir ./demo-data --benchmark
 
 seed-demo-data: $(BENCH_INDEX)
 	mkdir -p demo-data

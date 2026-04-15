@@ -15,12 +15,16 @@
  * - <input.sql> 또는 --interactive:
  *   SQL 파일 경로를 주면 파일 실행 모드로 동작합니다.
  *   --interactive를 주면 sqlproc> 프롬프트에서 SQL을 한 줄씩 입력합니다.
+ * - -b 또는 --benchmark:
+ *   벤치마크 더미 데이터를 만들고 PK / non-PK 조회 시간을 비교한 뒤
+ *   interactive 모드로 이어집니다.
  */
 static void print_usage(void)
 {
     fprintf(stderr,
             "usage: ./sqlproc --schema-dir <dir> --data-dir <dir> <input.sql>\n"
-            "       ./sqlproc --schema-dir <dir> --data-dir <dir> --interactive\n");
+            "       ./sqlproc --schema-dir <dir> --data-dir <dir> --interactive\n"
+            "       ./sqlproc --schema-dir <dir> --data-dir <dir> --benchmark\n");
 }
 
 int main(int argc, char **argv)

@@ -98,6 +98,7 @@ typedef struct {
     char data_dir[256];
     char input_path[256];
     int interactive_mode;
+    int benchmark_mode;
 } AppConfig;
 
 /* 사용자에게 보여 줄 오류 메시지와 선택적 위치 정보입니다. */
@@ -185,8 +186,12 @@ typedef struct {
 /* app.c — 인자 파싱, SQL 파일 읽기, 실행 진입 */
 int parse_arguments(int argc, char **argv, AppConfig *config);
 int load_sql_file(const char *path, char *buffer, size_t buffer_size, ErrorInfo *error);
+int run_sql_file(const AppConfig *config, const char *path, ErrorInfo *error);
 int run_program(const AppConfig *config);
 void print_error(const ErrorInfo *error);
+
+/* benchmark.c — 벤치마크 준비, 실행, 결과 출력 */
+int run_benchmark_mode(const AppConfig *config, ErrorInfo *error);
 
 /* tokenizer.c — SQL 문자열을 토큰 배열로 변환 */
 int tokenize_sql(const char *sql_text, TokenList *tokens, ErrorInfo *error);
