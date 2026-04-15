@@ -194,6 +194,20 @@ SELECT id, name FROM users WHERE age != 20;
 SELECT name, age FROM users WHERE name = 'user900000';
 ```
 
+레코드 수나 출력 파일을 바꾸고 싶으면 `make` 변수로 조절할 수 있습니다.
+
+```bash
+make seed-demo-data RECORDS=10000
+make seed-demo-data RECORDS=1000000 DATA_PATH=demo-data/users.csv
+```
+
+시간 차이를 바로 비교하려면 아래 예제를 실행합니다. 각 `SELECT` 뒤에
+`elapsed: ... ms`가 출력됩니다.
+
+```bash
+./build/sqlproc --schema-dir ./examples/schemas --data-dir ./demo-data ./examples/perf_compare.sql
+```
+
 - 스키마에 `id:int` 컬럼이 있으면 PK로 인식하고, `INSERT`에서 `id`를 빼면 현재 최대값 + 1을 자동 부여합니다.
 - 이미 존재하는 `id`를 넣으면 `PK 값이 이미 존재합니다.` 오류로 거절합니다.
 - `WHERE`, `JOIN`, `UPDATE`, `DELETE` 등은 아직 지원하지 않습니다.

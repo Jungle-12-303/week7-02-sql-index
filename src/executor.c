@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "sqlproc.h"
 
@@ -731,6 +732,9 @@ static int execute_select(const AppConfig *config,
     int selected_indices[SQLPROC_MAX_COLUMNS];
     int selected_count;
     int where_column_index;
+    clock_t start_time;
+    clock_t end_time;
+    int result;
 
     /*
      * SELECT 실행 흐름:
@@ -750,7 +754,14 @@ static int execute_select(const AppConfig *config,
     }
 
     if (!statement->has_where) {
-        return storage_print_rows(config, &schema, selected_indices, selected_count, error);
+        start_time = clock();
+        result = storage_print_rows(config, &schema, selected_indices, selected_count, error);
+        end_time = clock();
+        if (result) {
+            printf("elapsed: %.3f ms\n",
+                   ((double)(end_time - start_time) * 1000.0) / (double)CLOCKS_PER_SEC);
+        }
+        return result;
     }
 
     if (!resolve_where_column(&schema, statement, &where_column_index, error)) {
@@ -760,13 +771,31 @@ static int execute_select(const AppConfig *config,
     if (schema.primary_key_index >= 0 &&
         where_column_index == schema.primary_key_index &&
         statement->where_value.type == LITERAL_INT &&
+        (statement->where_operator == WHERE_OP_EQUAL ||
+         statement->where_operator == WHERE_OP_GREATER ||
+         statement->where_operator == WHERE_OP_LESS)) {
+        if (get_table_state_index(config, &schema, error) < 0) {
+            return 0;
+        }
+    }
+
+    if (schema.primary_key_index >= 0 &&
+        where_column_index == schema.primary_key_index &&
+        statement->where_value.type == LITERAL_INT &&
         statement->where_operator == WHERE_OP_EQUAL) {
-        return execute_select_with_index(config,
-                                         &schema,
-                                         statement,
-                                         selected_indices,
-                                         selected_count,
-                                         error);
+        start_time = clock();
+        result = execute_select_with_index(config,
+                                           &schema,
+                                           statement,
+                                           selected_indices,
+                                           selected_count,
+                                           error);
+        end_time = clock();
+        if (result) {
+            printf("elapsed: %.3f ms\n",
+                   ((double)(end_time - start_time) * 1000.0) / (double)CLOCKS_PER_SEC);
+        }
+        return result;
     }
 
     if (schema.primary_key_index >= 0 &&
@@ -774,21 +803,35 @@ static int execute_select(const AppConfig *config,
         statement->where_value.type == LITERAL_INT &&
         (statement->where_operator == WHERE_OP_GREATER ||
          statement->where_operator == WHERE_OP_LESS)) {
-        return execute_select_with_index_range(config,
-                                               &schema,
-                                               statement,
-                                               selected_indices,
-                                               selected_count,
-                                               error);
+        start_time = clock();
+        result = execute_select_with_index_range(config,
+                                                 &schema,
+                                                 statement,
+                                                 selected_indices,
+                                                 selected_count,
+                                                 error);
+        end_time = clock();
+        if (result) {
+            printf("elapsed: %.3f ms\n",
+                   ((double)(end_time - start_time) * 1000.0) / (double)CLOCKS_PER_SEC);
+        }
+        return result;
     }
 
-    return execute_select_with_scan(config,
-                                    &schema,
-                                    statement,
-                                    selected_indices,
-                                    selected_count,
-                                    where_column_index,
-                                    error);
+    start_time = clock();
+    result = execute_select_with_scan(config,
+                                      &schema,
+                                      statement,
+                                      selected_indices,
+                                      selected_count,
+                                      where_column_index,
+                                      error);
+    end_time = clock();
+    if (result) {
+        printf("elapsed: %.3f ms\n",
+               ((double)(end_time - start_time) * 1000.0) / (double)CLOCKS_PER_SEC);
+    }
+    return result;
 }
 
 int execute_program(const AppConfig *config, const SqlProgram *program, ErrorInfo *error)

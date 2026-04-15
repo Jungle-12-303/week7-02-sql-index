@@ -22,6 +22,8 @@ BENCH_OBJS = $(BUILD_DIR)/bench_index.o
 APP = $(BUILD_DIR)/sqlproc
 TEST_APP = $(BUILD_DIR)/test_runner
 BENCH_INDEX = $(BUILD_DIR)/bench_index
+RECORDS ?= 1000000
+DATA_PATH ?= demo-data/users.csv
 
 .PHONY: all test bench seed-demo-data clean
 
@@ -56,7 +58,7 @@ bench: $(BENCH_INDEX)
 
 seed-demo-data: $(BENCH_INDEX)
 	mkdir -p demo-data
-	./$(BENCH_INDEX) 1000000 demo-data/users.csv
+	./$(BENCH_INDEX) $(RECORDS) $(DATA_PATH)
 
 clean:
 	rm -rf $(BUILD_DIR)
