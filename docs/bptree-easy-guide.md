@@ -248,6 +248,104 @@ flowchart LR
 실제 SQL 실행 쪽에서는 [src/executor.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/executor.c:649)
 의 `execute_select_with_index_range()`가 이들을 사용합니다.
 
+## 일반 컬럼 조회는 언제 선형 탐색을 쓰나
+
+이 프로젝트는 "모든 WHERE 조건"에 인덱스를 쓰지 않습니다.
+현재 B+ Tree 인덱스는 PK `id` 하나만 대상으로 붙어 있습니다.
+
+즉 아래 두 조건 중 하나라도 해당하면 선형 탐색으로 갑니다.
+
+1. WHERE 컬럼이 PK `id`가 아닐 때
+2. WHERE 컬럼이 `id`여도 연산자가 `!=`일 때
+
+코드 기준으로 보면 [src/executor.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/executor.c:739)
+의 `execute_select()`는 아래 두 경우만 인덱스를 사용합니다.
+
+- `id = 값`
+- `id > 값`, `id < 값`
+
+그 외는 모두 [src/executor.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/executor.c:709)
+의 `execute_select_with_scan()`으로 갑니다.
+
+### 선형 탐색으로 가는 대표 예시
+
+| 쿼리 | 왜 인덱스를 안 쓰나 |
+| --- | --- |
+| `SELECT * FROM users WHERE name = 'kim';` | PK `id` 컬럼이 아님 |
+| `SELECT * FROM users WHERE age > 30;` | PK `id` 컬럼이 아님 |
+| `SELECT * FROM users WHERE id != 7;` | `!=`는 현재 인덱스 경로에 포함되지 않음 |
+
+`id != 7`이 인덱스를 바로 쓰기 어려운 이유는 "한 점을 찾는 exact lookup"도 아니고
+"한쪽 방향으로 이어지는 range scan"도 아니기 때문입니다. 현재 구현은
+정확한 한 점(`=`)과 한 방향 범위(`>`, `<`)만 인덱스로 처리합니다.
+
+```mermaid
+flowchart TD
+    A["SELECT ... WHERE ..."] --> B{"WHERE column is id?"}
+    B -->|No| C["선형 탐색"]
+    B -->|Yes| D{"operator is =, >, < ?"}
+    D -->|Yes| E["B+ Tree 사용"]
+    D -->|No| C
+```
+
+## 선형 탐색은 실제로 어떻게 동작하나
+
+선형 탐색의 핵심은 "CSV를 처음부터 끝까지 한 줄씩 읽고 조건을 비교한다"
+는 것입니다.
+
+실행 순서는 아래와 같습니다.
+
+1. `execute_select_with_scan()`가 `[SCAN]` 로그를 출력
+2. `storage_print_rows_where_equals()` 호출
+3. CSV 헤더를 읽고 스키마와 맞는지 검사
+4. 데이터 row를 한 줄씩 읽음
+5. 각 row의 WHERE 컬럼 값을 조건과 비교
+6. 조건이 맞는 row만 출력
+
+관련 코드는 아래입니다.
+
+- 선형 탐색 분기: [src/executor.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/executor.c:709)
+- CSV 한 줄씩 비교하는 함수: [src/storage.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/storage.c:675)
+- 실제 비교 로직: [src/storage.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/storage.c:604)
+
+```mermaid
+flowchart LR
+    A["execute_select_with_scan()"] --> B["[SCAN] 로그 출력"]
+    B --> C["storage_print_rows_where_equals()"]
+    C --> D["CSV 헤더 검증"]
+    D --> E["row 1 읽기"]
+    E --> F["조건 비교"]
+    F -->|일치| G["출력"]
+    F -->|불일치| H["다음 row"]
+    H --> F
+```
+
+### 비교는 어디서 하나
+
+[src/storage.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/storage.c:604)
+의 `csv_value_matches_where()`가 row 하나와 WHERE 조건 하나를 비교합니다.
+
+이 함수는 아래를 처리합니다.
+
+- 문자열 컬럼의 `=`, `!=`
+- 정수 컬럼의 `=`, `>`, `<`, `!=`
+
+즉 `storage_print_rows_where_equals()`라는 이름만 보면 "="만 할 것 같지만,
+실제로는 선형 탐색 경로 전체를 담당하는 함수라고 이해하면 됩니다.
+
+### 왜 선형 탐색이 필요한가
+
+이 프로젝트는 "PK 조회는 인덱스, 나머지는 기존 CSV 흐름 유지"가 목표입니다.
+그래서 비-PK 조건까지 억지로 인덱스로 처리하지 않고, 기존 구조를 그대로
+살린 선형 탐색을 유지합니다.
+
+이 덕분에 발표에서는 아래처럼 구분해서 설명할 수 있습니다.
+
+- `WHERE id = 7` -> B+ Tree exact lookup
+- `WHERE id > 7` -> B+ Tree range scan
+- `WHERE name = 'kim'` -> CSV 선형 탐색
+- `WHERE id != 7` -> CSV 선형 탐색
+
 ## 이 프로젝트 전체 흐름에서 B+ Tree는 어디에 붙는가
 
 이제 자료구조 설명을 넘어, SQL 처리기 안에서 어디에 붙는지 보겠습니다.
