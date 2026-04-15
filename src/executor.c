@@ -26,6 +26,16 @@ typedef struct {
 
 static TableRuntimeState table_states[EXECUTOR_MAX_TABLE_STATES];
 
+/* 실행 단계 오류 메시지와 소스 위치를 ErrorInfo에 기록한다.
+ *
+ * 입력:
+ * - error: 오류 정보를 저장할 구조체
+ * - message: 사용자에게 보여 줄 오류 메시지
+ * - location: SQL 소스 안의 line/column 위치
+ * 출력:
+ * - 반환값 없음
+ * - error: 메시지와 위치 정보가 채워짐
+ */
 static void set_runtime_error(ErrorInfo *error,
                               const char *message,
                               SourceLocation location)
@@ -36,6 +46,14 @@ static void set_runtime_error(ErrorInfo *error,
     error->column = location.column;
 }
 
+/* 스키마 안에서 특정 컬럼 이름의 인덱스를 찾는다.
+ *
+ * 입력:
+ * - schema: 검색 대상 테이블 스키마
+ * - name: 찾을 컬럼 이름
+ * 출력:
+ * - 반환값: 컬럼 인덱스, 없으면 -1
+ */
 static int find_schema_column(const TableSchema *schema, const char *name)
 {
     int i;
@@ -50,6 +68,14 @@ static int find_schema_column(const TableSchema *schema, const char *name)
     return -1;
 }
 
+/* 리터럴 타입이 스키마 컬럼 타입과 맞는지 확인한다.
+ *
+ * 입력:
+ * - data_type: 스키마 컬럼 타입
+ * - value: 검사할 리터럴 값
+ * 출력:
+ * - 반환값: 타입이 맞으면 1, 아니면 0
+ */
 static int validate_literal_type(DataType data_type, const LiteralValue *value)
 {
     /* INSERT에서 리터럴 타입이 컬럼 타입과 맞는지 확인합니다. */
@@ -64,11 +90,26 @@ static int validate_literal_type(DataType data_type, const LiteralValue *value)
     return 0;
 }
 
+/* 두 clock 값 차이를 밀리초 단위로 변환한다.
+ *
+ * 입력:
+ * - start_time: 시작 시각
+ * - end_time: 종료 시각
+ * 출력:
+ * - 반환값: 경과 시간(ms)
+ */
 static double elapsed_ms(clock_t start_time, clock_t end_time)
 {
     return ((double)(end_time - start_time) * 1000.0) / (double)CLOCKS_PER_SEC;
 }
 
+/* 정수 리터럴이 C의 int 범위 안에 들어오는지 확인한다.
+ *
+ * 입력:
+ * - value: 문자열 형태의 정수 리터럴
+ * 출력:
+ * - 반환값: int로 안전하게 변환 가능하면 1, 아니면 0
+ */
 static int int_literal_in_range(const LiteralValue *value)
 {
     char *end_ptr;
@@ -87,6 +128,13 @@ static int int_literal_in_range(const LiteralValue *value)
     return parsed_value >= INT_MIN && parsed_value <= INT_MAX;
 }
 
+/* 문자열 리터럴이 CSV/스프레드시트 수식 주입 위험이 없는지 확인한다.
+ *
+ * 입력:
+ * - value: 검사할 문자열 리터럴
+ * 출력:
+ * - 반환값: 안전하면 1, 위험한 시작 문자가 있으면 0
+ */
 static int string_literal_is_safe_for_csv(const LiteralValue *value)
 {
     char first_character;
@@ -106,6 +154,14 @@ static int string_literal_is_safe_for_csv(const LiteralValue *value)
            first_character != '@';
 }
 
+/* 현재 프로세스가 기억 중인 테이블 런타임 상태 슬롯을 찾는다.
+ *
+ * 입력:
+ * - config: schema/data 디렉터리 정보
+ * - schema: 대상 테이블 스키마
+ * 출력:
+ * - 반환값: 일치하는 상태 슬롯 인덱스, 없으면 -1
+ */
 static int find_table_state(const AppConfig *config, const TableSchema *schema)
 {
     int i;
@@ -122,6 +178,16 @@ static int find_table_state(const AppConfig *config, const TableSchema *schema)
     return -1;
 }
 
+/* 테이블 런타임 상태를 새로 만들고 필요하면 PK 인덱스를 재구성한다.
+ *
+ * 입력:
+ * - config: schema/data 디렉터리 정보
+ * - schema: 대상 테이블 스키마
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 생성된 상태 슬롯 인덱스, 실패 시 -1
+ * - table_states: 성공 시 next_id와 pk_index가 채워진 새 슬롯이 생김
+ */
 static int create_table_state(const AppConfig *config,
                               const TableSchema *schema,
                               ErrorInfo *error)
@@ -178,6 +244,15 @@ static int create_table_state(const AppConfig *config,
     return -1;
 }
 
+/* 기존 상태를 재사용하거나 새로 만들어 테이블 상태 슬롯 인덱스를 돌려준다.
+ *
+ * 입력:
+ * - config: schema/data 디렉터리 정보
+ * - schema: 대상 테이블 스키마
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 사용 가능한 상태 슬롯 인덱스, 실패 시 -1
+ */
 static int get_table_state_index(const AppConfig *config,
                                  const TableSchema *schema,
                                  ErrorInfo *error)
@@ -192,6 +267,17 @@ static int get_table_state_index(const AppConfig *config,
     return create_table_state(config, schema, error);
 }
 
+/* 자동 증가 PK 값을 하나 발급하고 다음 값을 준비한다.
+ *
+ * 입력:
+ * - config: 실행 설정
+ * - schema: 대상 테이블 스키마
+ * - next_id: 발급 결과를 저장할 포인터
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 발급 성공 시 1, 범위 초과 또는 상태 준비 실패 시 0
+ * - next_id: 성공 시 새 PK 값이 저장됨
+ */
 static int allocate_next_primary_key(const AppConfig *config,
                                      const TableSchema *schema,
                                      int *next_id,
@@ -214,6 +300,16 @@ static int allocate_next_primary_key(const AppConfig *config,
     return 1;
 }
 
+/* 사용자가 직접 넣은 PK를 기준으로 자동 증가 다음 값을 보정한다.
+ *
+ * 입력:
+ * - config: 실행 설정
+ * - schema: 대상 테이블 스키마
+ * - explicit_id: 사용자가 명시한 PK 값
+ * 출력:
+ * - 반환값 없음
+ * - table_states: 필요 시 next_id가 explicit_id + 1로 갱신됨
+ */
 static void remember_explicit_primary_key(const AppConfig *config,
                                           const TableSchema *schema,
                                           int explicit_id)
@@ -230,6 +326,17 @@ static void remember_explicit_primary_key(const AppConfig *config,
     }
 }
 
+/* INSERT 한 행 문자열 배열에서 PK 컬럼 값을 int로 해석한다.
+ *
+ * 입력:
+ * - schema: 대상 테이블 스키마
+ * - row_values: 스키마 순서로 정리된 행 값 배열
+ * - primary_key_value: 결과 PK를 저장할 포인터
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: PK 읽기 성공 시 1, 형식 오류 시 0
+ * - primary_key_value: 성공 시 int PK 값이 저장됨
+ */
 static int parse_row_primary_key(const TableSchema *schema,
                                  char row_values[SQLPROC_MAX_COLUMNS][SQLPROC_MAX_VALUE_LEN],
                                  int *primary_key_value,
@@ -250,6 +357,16 @@ static int parse_row_primary_key(const TableSchema *schema,
     return 1;
 }
 
+/* 현재 PK 인덱스를 이용해 중복 PK 삽입을 막는다.
+ *
+ * 입력:
+ * - config: 실행 설정
+ * - schema: 대상 테이블 스키마
+ * - primary_key_value: 검사할 PK 값
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 중복이 없으면 1, 이미 존재하거나 상태 준비 실패 시 0
+ */
 static int validate_primary_key_unique(const AppConfig *config,
                                        const TableSchema *schema,
                                        int primary_key_value,
@@ -278,6 +395,18 @@ static int validate_primary_key_unique(const AppConfig *config,
     return 1;
 }
 
+/* INSERT 문 구조체를 실제 CSV 한 행 값 배열로 정렬한다.
+ *
+ * 입력:
+ * - config: 실행 설정
+ * - schema: 대상 테이블 스키마
+ * - statement: 파서가 만든 INSERT 문 구조체
+ * - row_values: 결과 행 값을 저장할 2차원 배열
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 변환 성공 시 1, 컬럼/타입/값 오류 시 0
+ * - row_values: 성공 시 스키마 순서대로 값이 채워짐
+ */
 static int build_insert_row_values(const AppConfig *config,
                                    const TableSchema *schema,
                                    const InsertStatement *statement,
@@ -406,6 +535,16 @@ static int build_insert_row_values(const AppConfig *config,
     return 1;
 }
 
+/* INSERT 문을 실행해 CSV와 PK 인덱스에 새 행을 반영한다.
+ *
+ * 입력:
+ * - config: 실행 설정
+ * - statement: 실행할 INSERT 문
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: INSERT 성공 시 1, 중간 검증/저장 실패 시 0
+ * - 부가 효과: CSV에 행이 추가되고 PK 인덱스가 갱신될 수 있음
+ */
 static int execute_insert(const AppConfig *config,
                           const InsertStatement *statement,
                           ErrorInfo *error)
@@ -465,6 +604,18 @@ static int execute_insert(const AppConfig *config,
     return 1;
 }
 
+/* SELECT 대상 컬럼 이름들을 실제 스키마 인덱스 배열로 바꾼다.
+ *
+ * 입력:
+ * - schema: 대상 테이블 스키마
+ * - statement: SELECT 문 구조체
+ * - selected_indices: 결과 인덱스 배열
+ * - selected_count: 결과 개수를 저장할 포인터
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 해석 성공 시 1, 알 수 없는 컬럼이 있으면 0
+ * - selected_indices/selected_count: 성공 시 출력할 컬럼 위치가 채워짐
+ */
 static int resolve_selected_columns(const TableSchema *schema,
                                     const SelectStatement *statement,
                                     int selected_indices[SQLPROC_MAX_COLUMNS],
@@ -502,6 +653,17 @@ static int resolve_selected_columns(const TableSchema *schema,
     return 1;
 }
 
+/* WHERE 절의 컬럼과 리터럴 타입이 스키마와 맞는지 검증한다.
+ *
+ * 입력:
+ * - schema: 대상 테이블 스키마
+ * - statement: SELECT 문 구조체
+ * - where_column_index: 결과 컬럼 인덱스를 저장할 포인터
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: WHERE 검증 성공 시 1, 실패 시 0
+ * - where_column_index: 성공 시 WHERE 대상 컬럼 인덱스가 저장됨
+ */
 static int resolve_where_column(const TableSchema *schema,
                                 const SelectStatement *statement,
                                 int *where_column_index,
@@ -543,6 +705,15 @@ static int resolve_where_column(const TableSchema *schema,
     return 1;
 }
 
+/* WHERE 절의 정수 리터럴을 int 값으로 안전하게 변환한다.
+ *
+ * 입력:
+ * - value: 문자열 형태의 정수 리터럴
+ * - out_value: 변환 결과를 저장할 포인터
+ * 출력:
+ * - 반환값: 변환 성공 시 1, 범위 또는 형식 오류 시 0
+ * - out_value: 성공 시 int 값이 저장됨
+ */
 static int parse_where_int_value(const LiteralValue *value, int *out_value)
 {
     char *end_ptr;
@@ -559,6 +730,19 @@ static int parse_where_int_value(const LiteralValue *value, int *out_value)
     return 1;
 }
 
+/* PK = 값 조건을 B+ Tree 단건 검색으로 실행한다.
+ *
+ * 입력:
+ * - config: 실행 설정
+ * - schema: 대상 테이블 스키마
+ * - statement: 실행할 SELECT 문
+ * - selected_indices: 출력할 컬럼 인덱스 배열
+ * - selected_count: 출력할 컬럼 개수
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 조회 성공 시 1, 실패 시 0
+ * - 부가 효과: [INDEX] 로그와 조회 결과를 표준 출력에 표시
+ */
 static int execute_select_with_index(const AppConfig *config,
                                      const TableSchema *schema,
                                      const SelectStatement *statement,
@@ -604,6 +788,16 @@ typedef struct {
     int capacity;
 } OffsetList;
 
+/* range scan 중 찾은 row offset을 동적 배열 끝에 추가한다.
+ *
+ * 입력:
+ * - key: 방문 중인 PK 값(이 함수에서는 사용하지 않음)
+ * - offset: 추가할 CSV row offset
+ * - user_data: OffsetList 포인터
+ * 출력:
+ * - 반환값: 추가 성공 시 1, 메모리 재할당 실패 시 0
+ * - user_data(OffsetList): 성공 시 offsets/count가 갱신됨
+ */
 static int append_offset(int key, long offset, void *user_data)
 {
     OffsetList *list;
@@ -614,6 +808,10 @@ static int append_offset(int key, long offset, void *user_data)
     list = (OffsetList *)user_data;
 
     if (list->count == list->capacity) {
+        /*
+         * range scan 결과 개수는 미리 알 수 없으므로
+         * 용량이 찰 때마다 2배씩 늘려 재할당 횟수를 줄입니다.
+         */
         next_capacity = list->capacity == 0 ? 16 : list->capacity * 2;
         next_offsets = (long *)realloc(list->offsets, sizeof(long) * (size_t)next_capacity);
         if (next_offsets == NULL) {
@@ -629,6 +827,13 @@ static int append_offset(int key, long offset, void *user_data)
     return 1;
 }
 
+/* WHERE 연산자 enum을 로그 출력용 문자열로 바꾼다.
+ *
+ * 입력:
+ * - where_operator: 문자열로 바꿀 비교 연산자
+ * 출력:
+ * - 반환값: "=", ">", "<", "!=" 중 하나의 문자열 상수
+ */
 static const char *where_operator_text(WhereOperator where_operator)
 {
     if (where_operator == WHERE_OP_EQUAL) {
@@ -646,6 +851,19 @@ static const char *where_operator_text(WhereOperator where_operator)
     return "!=";
 }
 
+/* PK > 값 또는 PK < 값 조건을 B+ Tree range scan으로 실행한다.
+ *
+ * 입력:
+ * - config: 실행 설정
+ * - schema: 대상 테이블 스키마
+ * - statement: 실행할 SELECT 문
+ * - selected_indices: 출력할 컬럼 인덱스 배열
+ * - selected_count: 출력할 컬럼 개수
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 조회 성공 시 1, 실패 시 0
+ * - 부가 효과: [INDEX-RANGE] 로그와 결과 행들을 표준 출력에 표시
+ */
 static int execute_select_with_index_range(const AppConfig *config,
                                            const TableSchema *schema,
                                            const SelectStatement *statement,
@@ -689,6 +907,10 @@ static int execute_select_with_index_range(const AppConfig *config,
         return 0;
     }
 
+    /*
+     * range scan은 "조건에 맞는 row offset 목록"을 먼저 모은 뒤 출력합니다.
+     * 이렇게 하면 B+ Tree 순회 로직과 CSV 출력 로직을 분리해 각각 단순하게 유지할 수 있습니다.
+     */
     printf("[INDEX-RANGE] WHERE %s %s %s (%d rows)\n",
            statement->where_column,
            where_operator_text(statement->where_operator),
@@ -706,6 +928,20 @@ static int execute_select_with_index_range(const AppConfig *config,
     return ok;
 }
 
+/* 인덱스를 쓸 수 없는 WHERE 조건을 CSV 선형 탐색으로 실행한다.
+ *
+ * 입력:
+ * - config: 실행 설정
+ * - schema: 대상 테이블 스키마
+ * - statement: 실행할 SELECT 문
+ * - selected_indices: 출력할 컬럼 인덱스 배열
+ * - selected_count: 출력할 컬럼 개수
+ * - where_column_index: 비교할 컬럼 인덱스
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 조회 성공 시 1, 실패 시 0
+ * - 부가 효과: [SCAN] 로그와 결과 행들을 표준 출력에 표시
+ */
 static int execute_select_with_scan(const AppConfig *config,
                                     const TableSchema *schema,
                                     const SelectStatement *statement,
@@ -729,6 +965,16 @@ static int execute_select_with_scan(const AppConfig *config,
                                            error);
 }
 
+/* SELECT 문을 상황에 맞게 전체 조회, 인덱스 조회, 선형 탐색으로 실행한다.
+ *
+ * 입력:
+ * - config: 실행 설정
+ * - statement: 실행할 SELECT 문
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: SELECT 성공 시 1, 실패 시 0
+ * - 부가 효과: 조회 결과와 elapsed 시간을 표준 출력에 표시
+ */
 static int execute_select(const AppConfig *config,
                           const SelectStatement *statement,
                           ErrorInfo *error)
@@ -785,6 +1031,11 @@ static int execute_select(const AppConfig *config,
                       (statement->where_operator == WHERE_OP_GREATER ||
                        statement->where_operator == WHERE_OP_LESS);
 
+    /*
+     * 인덱스는 "PK int 컬럼"에 대한 =, >, < 조건일 때 사용합니다.
+     * PK가 아니거나 문자열 비교, != 같은 조건은 기존 CSV 선형 탐색 경로로 내려갑니다.
+     */
+
     start_time = clock();
     if (use_index_lookup || use_index_range) {
         if (get_table_state_index(config, &schema, error) < 0) {
@@ -834,6 +1085,16 @@ static int execute_select(const AppConfig *config,
     return result;
 }
 
+/* SqlProgram에 담긴 여러 SQL 문장을 앞에서부터 순서대로 실행한다.
+ *
+ * 입력:
+ * - config: 실행 설정
+ * - program: 파서가 만든 SQL 문장 목록
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 모든 문장 성공 시 1, 중간 문장 실패 시 0
+ * - 부가 효과: 각 문장 실행 결과가 표준 출력에 표시될 수 있음
+ */
 int execute_program(const AppConfig *config, const SqlProgram *program, ErrorInfo *error)
 {
     int i;

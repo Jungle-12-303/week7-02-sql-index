@@ -15,6 +15,16 @@ typedef struct {
     int position;
 } ParserState;
 
+/* 파서 오류 메시지와 토큰 위치를 ErrorInfo에 기록한다.
+ *
+ * 입력:
+ * - error: 오류 정보를 저장할 구조체
+ * - token: 현재 문제가 된 토큰
+ * - message: 사용자에게 보여 줄 오류 메시지
+ * 출력:
+ * - 반환값 없음
+ * - error: 메시지와 line/column 정보가 채워짐
+ */
 static void set_error(ErrorInfo *error, const Token *token, const char *message)
 {
     /* 파서 오류는 현재 바라보는 토큰의 위치를 함께 기록합니다. */
@@ -23,12 +33,26 @@ static void set_error(ErrorInfo *error, const Token *token, const char *message)
     error->column = token->column;
 }
 
+/* 현재 파싱 위치가 가리키는 토큰을 반환한다.
+ *
+ * 입력:
+ * - state: 토큰 배열과 현재 위치를 담은 파서 상태
+ * 출력:
+ * - 반환값: state->position 위치의 토큰 포인터
+ */
 static const Token *current_token(ParserState *state)
 {
     /* 현재 파싱 위치의 토큰을 돌려줍니다. */
     return &state->tokens->items[state->position];
 }
 
+/* 직전에 소비한 토큰을 반환한다.
+ *
+ * 입력:
+ * - state: 현재 파서 상태
+ * 출력:
+ * - 반환값: 마지막으로 읽은 토큰 포인터
+ */
 static const Token *previous_token(ParserState *state)
 {
     /* 직전에 소비한 토큰을 돌려줍니다. */
@@ -38,6 +62,14 @@ static const Token *previous_token(ParserState *state)
     return &state->tokens->items[state->position - 1];
 }
 
+/* EOF를 넘지 않는 범위에서 다음 토큰으로 이동한다.
+ *
+ * 입력:
+ * - state: 이동할 파서 상태
+ * 출력:
+ * - 반환값 없음
+ * - state: position이 가능한 경우 1칸 증가함
+ */
 static void advance_token(ParserState *state)
 {
     /* EOF를 넘기지 않는 범위에서 다음 토큰으로 이동합니다. */
@@ -46,12 +78,33 @@ static void advance_token(ParserState *state)
     }
 }
 
+/* 현재 토큰이 기대한 종류인지 확인한다.
+ *
+ * 입력:
+ * - state: 현재 파서 상태
+ * - expected_type: 기대하는 토큰 종류
+ * 출력:
+ * - 반환값: 종류가 같으면 1, 다르면 0
+ */
 static int token_matches(ParserState *state, TokenType expected_type)
 {
     /* 현재 토큰이 기대한 종류인지 단순 비교합니다. */
     return current_token(state)->type == expected_type;
 }
 
+/* 기대한 토큰이면 소비하고, 아니면 파서 오류를 만든다.
+ *
+ * 입력:
+ * - state: 현재 파서 상태
+ * - expected_type: 반드시 와야 하는 토큰 종류
+ * - error: 실패 시 오류를 기록할 구조체
+ * - message: 실패 시 사용할 오류 메시지
+ * 출력:
+ * - 반환값: 소비 성공 시 1, 기대와 다르면 0
+ * - state: 성공 시 다음 토큰으로 이동
+ * - error: 실패 시 메시지와 위치가 기록됨
+ * - 참고: 여기서 "소비"는 토큰을 확인한 뒤 파서 위치를 다음 토큰으로 넘긴다는 뜻
+ */
 static int consume_token(ParserState *state, TokenType expected_type, ErrorInfo *error, const char *message)
 {
     /*
@@ -67,6 +120,18 @@ static int consume_token(ParserState *state, TokenType expected_type, ErrorInfo 
     return 1;
 }
 
+/* 토큰 문자열을 이름 버퍼에 복사하고 필요하면 소스 위치도 저장한다.
+ *
+ * 입력:
+ * - dest: 이름을 저장할 목적지 버퍼
+ * - location: 토큰 위치를 저장할 구조체 포인터, NULL 허용
+ * - token: 복사할 식별자 토큰
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 복사 성공 시 1, 이름 길이 초과 시 0
+ * - dest: 성공 시 토큰 문자열이 저장됨
+ * - location: NULL이 아니면 토큰의 line/column이 저장됨
+ */
 static int copy_name(char dest[SQLPROC_MAX_NAME_LEN],
                      SourceLocation *location,
                      const Token *token,
@@ -88,6 +153,18 @@ static int copy_name(char dest[SQLPROC_MAX_NAME_LEN],
     return 1;
 }
 
+/* 현재 토큰이 식별자인지 검사하고 이름 버퍼로 옮긴다.
+ *
+ * 입력:
+ * - state: 현재 파서 상태
+ * - dest: 식별자 이름을 저장할 버퍼
+ * - location: 식별자 위치를 저장할 구조체 포인터, NULL 허용
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 식별자 읽기 성공 시 1, 아니면 0
+ * - dest: 성공 시 식별자 이름이 저장됨
+ * - state: 성공 시 다음 토큰으로 이동
+ */
 static int parse_identifier(ParserState *state,
                             char dest[SQLPROC_MAX_NAME_LEN],
                             SourceLocation *location,
@@ -107,6 +184,17 @@ static int parse_identifier(ParserState *state,
     return 1;
 }
 
+/* 현재 토큰을 숫자 또는 문자열 LiteralValue 구조체로 변환한다.
+ *
+ * 입력:
+ * - state: 현재 파서 상태
+ * - value: 결과를 저장할 리터럴 구조체
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 리터럴 읽기 성공 시 1, 아니면 0
+ * - value: 성공 시 타입, 텍스트, 소스 위치가 채워짐
+ * - state: 성공 시 다음 토큰으로 이동
+ */
 static int parse_literal(ParserState *state, LiteralValue *value, ErrorInfo *error)
 {
     /* 숫자 또는 문자열 리터럴을 LiteralValue 구조체로 바꿉니다. */
@@ -132,6 +220,17 @@ static int parse_literal(ParserState *state, LiteralValue *value, ErrorInfo *err
     return 0;
 }
 
+/* WHERE 절의 비교 연산자를 enum 값으로 해석한다.
+ *
+ * 입력:
+ * - state: 현재 파서 상태
+ * - where_operator: 결과를 저장할 연산자 변수
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 지원 연산자면 1, 아니면 0
+ * - where_operator: 성공 시 =, >, <, != 중 하나가 저장됨
+ * - state: 성공 시 다음 토큰으로 이동
+ */
 static int parse_where_operator(ParserState *state,
                                 WhereOperator *where_operator,
                                 ErrorInfo *error)
@@ -164,6 +263,19 @@ static int parse_where_operator(ParserState *state,
     return 0;
 }
 
+/* VALUES (...) 안의 리터럴 목록을 순서대로 읽는다.
+ *
+ * 입력:
+ * - state: 현재 파서 상태
+ * - values: 읽은 리터럴을 저장할 배열
+ * - value_count: 실제 읽은 개수를 저장할 포인터
+ * - expected_count: 정확히 맞춰야 하는 값 개수, 제한 없으면 음수
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 목록 파싱 성공 시 1, 개수 또는 형식 오류 시 0
+ * - values: 성공 시 읽은 리터럴들이 채워짐
+ * - value_count: 성공 시 읽은 개수가 저장됨
+ */
 static int parse_value_list(ParserState *state,
                             LiteralValue values[SQLPROC_MAX_COLUMNS],
                             int *value_count,
@@ -212,6 +324,17 @@ static int parse_value_list(ParserState *state,
     return 1;
 }
 
+/* INSERT 문 1개를 읽어 Statement 구조체에 채운다.
+ *
+ * 입력:
+ * - state: 현재 파서 상태
+ * - statement: 결과를 저장할 문장 구조체
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: INSERT 문 파싱 성공 시 1, 실패 시 0
+ * - statement: 성공 시 INSERT 관련 필드가 채워짐
+ * - state: 성공 시 문장 끝 직전 위치까지 이동
+ */
 static int parse_insert_statement(ParserState *state, Statement *statement, ErrorInfo *error)
 {
     InsertStatement *insert_statement;
@@ -299,6 +422,17 @@ static int parse_insert_statement(ParserState *state, Statement *statement, Erro
     return 1;
 }
 
+/* SELECT 문 1개를 읽어 Statement 구조체에 채운다.
+ *
+ * 입력:
+ * - state: 현재 파서 상태
+ * - statement: 결과를 저장할 문장 구조체
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: SELECT 문 파싱 성공 시 1, 실패 시 0
+ * - statement: 성공 시 선택 컬럼, 테이블, WHERE 정보가 채워짐
+ * - state: 성공 시 문장 끝 직전 위치까지 이동
+ */
 static int parse_select_statement(ParserState *state, Statement *statement, ErrorInfo *error)
 {
     SelectStatement *select_statement;
@@ -374,6 +508,16 @@ static int parse_select_statement(ParserState *state, Statement *statement, Erro
     return 1;
 }
 
+/* 현재 시작 토큰을 보고 INSERT 또는 SELECT 파서를 선택한다.
+ *
+ * 입력:
+ * - state: 현재 파서 상태
+ * - statement: 결과를 저장할 문장 구조체
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 지원 문장 파싱 성공 시 1, 알 수 없는 시작 토큰이면 0
+ * - statement: 성공 시 해당 문장 정보가 채워짐
+ */
 static int parse_statement(ParserState *state, Statement *statement, ErrorInfo *error)
 {
     /* 현재 토큰의 시작 키워드를 보고 어떤 문장 파서를 호출할지 결정합니다. */
@@ -389,6 +533,17 @@ static int parse_statement(ParserState *state, Statement *statement, ErrorInfo *
     return 0;
 }
 
+/* 토큰 배열 전체를 읽어 여러 SQL 문장을 SqlProgram으로 만든다.
+ *
+ * 입력:
+ * - tokens: tokenize_sql이 만든 입력 토큰 배열
+ * - program: 결과 문장 목록을 저장할 구조체
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 모든 문장 파싱 성공 시 1, 중간 오류 시 0
+ * - program: 성공 시 세미콜론으로 구분된 문장들이 순서대로 채워짐
+ * - error: 실패 시 현재 위치 기준 오류가 기록됨
+ */
 int parse_program(const TokenList *tokens, SqlProgram *program, ErrorInfo *error)
 {
     ParserState state;
@@ -430,4 +585,3 @@ int parse_program(const TokenList *tokens, SqlProgram *program, ErrorInfo *error
 
     return 1;
 }
-

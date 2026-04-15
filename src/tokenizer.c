@@ -9,6 +9,17 @@
  * 파서는 원본 문자열 대신 이 토큰 배열을 입력으로 받아 문법을 해석합니다.
  */
 
+/* 토큰화 과정에서 발견한 오류 메시지와 위치를 기록한다.
+ *
+ * 입력:
+ * - error: 오류 정보를 저장할 구조체
+ * - message: 사용자에게 보여 줄 오류 메시지
+ * - line: 오류가 발생한 줄 번호
+ * - column: 오류가 발생한 열 번호
+ * 출력:
+ * - 반환값 없음
+ * - error: 메시지와 line/column 정보가 채워짐
+ */
 static void set_error(ErrorInfo *error, const char *message, int line, int column)
 {
     /* 토크나이저 오류는 현재 줄/열 번호를 함께 저장합니다. */
@@ -17,6 +28,16 @@ static void set_error(ErrorInfo *error, const char *message, int line, int colum
     error->column = column;
 }
 
+/* 키워드 판별용으로 문자열을 소문자 복사본으로 만든다.
+ *
+ * 입력:
+ * - dest: 결과를 저장할 버퍼
+ * - dest_size: dest의 크기
+ * - src: 원본 문자열
+ * 출력:
+ * - 반환값 없음
+ * - dest: 소문자 문자열이 저장됨
+ */
 static void to_lowercase_copy(char *dest, size_t dest_size, const char *src)
 {
     size_t i;
@@ -29,6 +50,13 @@ static void to_lowercase_copy(char *dest, size_t dest_size, const char *src)
     dest[i] = '\0';
 }
 
+/* 단어 문자열이 예약어인지 일반 식별자인지 판정한다.
+ *
+ * 입력:
+ * - text: 소문자 기준으로 정규화된 단어 문자열
+ * 출력:
+ * - 반환값: 해당 단어에 맞는 TokenType
+ */
 static TokenType keyword_type(const char *text)
 {
     /* 읽은 단어가 예약어인지 일반 식별자인지 구분합니다. */
@@ -59,6 +87,19 @@ static TokenType keyword_type(const char *text)
     return TOKEN_IDENTIFIER;
 }
 
+/* TokenList 뒤에 토큰 1개를 추가한다.
+ *
+ * 입력:
+ * - tokens: 결과 토큰 배열
+ * - type: 추가할 토큰 종류
+ * - text: 토큰 원문 또는 정규화된 문자열
+ * - line: 토큰 시작 줄 번호
+ * - column: 토큰 시작 열 번호
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 추가 성공 시 1, 최대 개수 초과 시 0
+ * - tokens: 성공 시 새 토큰이 뒤에 붙음
+ */
 static int append_token(TokenList *tokens,
                         TokenType type,
                         const char *text,
@@ -83,6 +124,20 @@ static int append_token(TokenList *tokens,
     return 1;
 }
 
+/* 식별자 또는 키워드 형태의 연속된 문자를 읽어 토큰으로 만든다.
+ *
+ * 입력:
+ * - sql_text: 전체 SQL 문자열
+ * - index: 현재 읽기 위치 포인터
+ * - line: 토큰 시작 줄 번호
+ * - column: 토큰 시작 열 번호
+ * - tokens: 결과를 쌓을 토큰 배열
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 읽기 성공 시 1, 길이 초과 등 실패 시 0
+ * - index: 성공 시 읽은 단어 뒤 위치로 이동
+ * - tokens: 새 단어 토큰이 추가됨
+ */
 static int read_word(const char *sql_text,
                      int *index,
                      int line,
@@ -124,6 +179,20 @@ static int read_word(const char *sql_text,
     return append_token(tokens, type, raw_text, line, column, error);
 }
 
+/* 정수 리터럴을 읽어 숫자 토큰으로 추가한다.
+ *
+ * 입력:
+ * - sql_text: 전체 SQL 문자열
+ * - index: 현재 읽기 위치 포인터
+ * - line: 숫자 시작 줄 번호
+ * - column: 숫자 시작 열 번호
+ * - tokens: 결과 토큰 배열
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 읽기 성공 시 1, 형식 오류 시 0
+ * - index: 성공 시 숫자 뒤 위치로 이동
+ * - tokens: TOKEN_NUMBER 토큰이 추가됨
+ */
 static int read_number(const char *sql_text,
                        int *index,
                        int line,
@@ -157,6 +226,20 @@ static int read_number(const char *sql_text,
     return append_token(tokens, TOKEN_NUMBER, number_text, line, column, error);
 }
 
+/* 작은따옴표 문자열을 읽어 내용만 TOKEN_STRING으로 저장한다.
+ *
+ * 입력:
+ * - sql_text: 전체 SQL 문자열
+ * - index: 현재 읽기 위치 포인터
+ * - line: 문자열 시작 줄 번호
+ * - column: 문자열 시작 열 번호
+ * - tokens: 결과 토큰 배열
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 읽기 성공 시 1, 닫는 따옴표 없음 등 실패 시 0
+ * - index: 성공 시 문자열 뒤 위치로 이동
+ * - tokens: TOKEN_STRING 토큰이 추가됨
+ */
 static int read_string(const char *sql_text,
                        int *index,
                        int line,
@@ -200,6 +283,20 @@ static int read_string(const char *sql_text,
     return append_token(tokens, TOKEN_STRING, string_text, line, column, error);
 }
 
+/* 쉼표, 괄호, 비교 연산자 같은 기호를 읽어 토큰으로 만든다.
+ *
+ * 입력:
+ * - sql_text: 전체 SQL 문자열
+ * - index: 현재 읽기 위치 포인터
+ * - line: 기호 시작 줄 번호
+ * - column: 기호 시작 열 번호
+ * - tokens: 결과 토큰 배열
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 지원 기호면 1, 알 수 없는 문자면 0
+ * - index: 성공 시 기호 뒤 위치로 이동
+ * - tokens: 해당 기호 토큰이 추가됨
+ */
 static int read_symbol(const char *sql_text,
                        int *index,
                        int line,
@@ -265,6 +362,17 @@ static int read_symbol(const char *sql_text,
     return 0;
 }
 
+/* SQL 원문 문자열을 TokenList 배열로 분해한다.
+ *
+ * 입력:
+ * - sql_text: 토큰화할 SQL 원문
+ * - tokens: 결과 토큰을 저장할 배열 구조체
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 토큰화 성공 시 1, 실패 시 0
+ * - tokens: 성공 시 마지막 TOKEN_EOF까지 포함한 토큰 목록이 채워짐
+ * - error: 실패 시 위치 정보가 기록됨
+ */
 int tokenize_sql(const char *sql_text, TokenList *tokens, ErrorInfo *error)
 {
     int index;

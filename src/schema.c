@@ -10,6 +10,15 @@
  *   id:int,name:string,age:int
  */
 
+/* 스키마 로딩 단계의 오류 메시지를 ErrorInfo에 기록한다.
+ *
+ * 입력:
+ * - error: 오류 정보를 저장할 구조체
+ * - message: 사용자에게 보여 줄 오류 문자열
+ * 출력:
+ * - 반환값 없음
+ * - error: 파일 단위 오류 메시지로 갱신됨
+ */
 static void set_error(ErrorInfo *error, const char *message)
 {
     /* 스키마 로더 오류는 파일 단위 오류라 줄/열 없이 메시지만 저장합니다. */
@@ -18,6 +27,16 @@ static void set_error(ErrorInfo *error, const char *message)
     error->column = 0;
 }
 
+/* 문자열을 소문자로 변환해 별도 버퍼에 복사한다.
+ *
+ * 입력:
+ * - dest: 결과를 저장할 버퍼
+ * - dest_size: dest의 크기
+ * - src: 원본 문자열
+ * 출력:
+ * - 반환값 없음
+ * - dest: 소문자로 정규화된 문자열이 저장됨
+ */
 static void to_lowercase_copy(char *dest, size_t dest_size, const char *src)
 {
     size_t i;
@@ -30,6 +49,15 @@ static void to_lowercase_copy(char *dest, size_t dest_size, const char *src)
     dest[i] = '\0';
 }
 
+/* 스키마 파일의 타입 문자열을 내부 enum 값으로 바꾼다.
+ *
+ * 입력:
+ * - text: "int", "string" 같은 타입 문자열
+ * - data_type: 변환 결과를 저장할 포인터
+ * 출력:
+ * - 반환값: 지원 타입이면 1, 알 수 없는 타입이면 0
+ * - data_type: 성공 시 대응하는 DataType 값이 저장됨
+ */
 static int parse_data_type(const char *text, DataType *data_type)
 {
     /* 스키마 파일의 타입 문자열을 내부 DataType enum으로 바꿉니다. */
@@ -46,6 +74,14 @@ static int parse_data_type(const char *text, DataType *data_type)
     return 0;
 }
 
+/* 이미 읽은 스키마 컬럼 이름과 중복되는 이름이 있는지 확인한다.
+ *
+ * 입력:
+ * - schema: 현재까지 채워진 테이블 스키마
+ * - name: 새로 검사할 컬럼 이름
+ * 출력:
+ * - 반환값: 중복이면 1, 아니면 0
+ */
 static int has_duplicate_column_name(const TableSchema *schema, const char *name)
 {
     int i;
@@ -59,6 +95,20 @@ static int has_duplicate_column_name(const TableSchema *schema, const char *name
     return 0;
 }
 
+/* <table>.schema 파일을 읽어 TableSchema 구조체를 완성한다.
+ *
+ * 입력:
+ * - schema_dir: 스키마 파일들이 들어 있는 디렉터리
+ * - table_name: 읽을 테이블 이름
+ * - schema: 결과를 저장할 스키마 구조체
+ * - error: 실패 시 오류 메시지를 기록할 구조체
+ * 출력:
+ * - 반환값: 로딩 성공 시 1, 형식 오류 또는 파일 오류 시 0
+ * - schema: 성공 시 컬럼 이름, 타입, PK 위치 정보가 채워짐
+ *   이 프로젝트에서는 이름이 정확히 `id`이고 타입이 `int`인 컬럼을
+ *   primary_key_index로 자동 인식함
+ * - error: 실패 시 원인이 기록됨
+ */
 int load_table_schema(const char *schema_dir,
                       const char *table_name,
                       TableSchema *schema,
@@ -160,6 +210,7 @@ int load_table_schema(const char *schema_dir,
                  "%s",
                  lower_name);
 
+        /* 별도 PRIMARY KEY 문법 대신 `id:int` 컬럼을 PK로 간주합니다. */
         if (strcmp(lower_name, "id") == 0 &&
             schema->columns[schema->column_count].type == DATA_TYPE_INT) {
             schema->primary_key_index = schema->column_count;

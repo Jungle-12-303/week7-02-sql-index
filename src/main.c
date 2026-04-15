@@ -16,6 +16,14 @@
  *   SQL 파일 경로를 주면 파일 실행 모드로 동작합니다.
  *   --interactive를 주면 sqlproc> 프롬프트에서 SQL을 한 줄씩 입력합니다.
  */
+/* 프로그램 사용법을 stderr로 출력한다.
+ *
+ * 입력:
+ * - 없음
+ * 출력:
+ * - 반환값 없음
+ * - 표준 오류(stderr)에 지원 명령행 형식을 출력
+ */
 static void print_usage(void)
 {
     fprintf(stderr,
@@ -23,6 +31,15 @@ static void print_usage(void)
             "       ./sqlproc --schema-dir <dir> --data-dir <dir> --interactive\n");
 }
 
+/* 프로그램 진입점에서 인자를 해석하고 실행기로 제어를 넘긴다.
+ *
+ * 입력:
+ * - argc: 커맨드라인 인자 개수
+ * - argv: 커맨드라인 인자 문자열 배열
+ * 출력:
+ * - 반환값: 성공 시 0, 사용법 오류 또는 실행 실패 시 1
+ * - 부가 효과: 표준 출력/표준 오류에 실행 결과 또는 오류 메시지 출력
+ */
 int main(int argc, char **argv)
 {
     /*

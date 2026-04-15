@@ -14,6 +14,16 @@
 
 static int run_sql_text(const AppConfig *config, const char *sql_text, ErrorInfo *error);
 
+/* 명령행 인자를 읽어 실행 설정(AppConfig) 구조체를 채운다.
+ *
+ * 입력:
+ * - argc: 커맨드라인 인자 개수
+ * - argv: 커맨드라인 인자 문자열 배열
+ * - config: 해석 결과를 저장할 설정 구조체
+ * 출력:
+ * - 반환값: 지원 형식이면 1, 잘못된 인자 구성이면 0
+ * - config: 성공 시 schema_dir, data_dir, input_path 또는 interactive_mode가 채워짐
+ */
 int parse_arguments(int argc, char **argv, AppConfig *config)
 {
     int i;
@@ -63,6 +73,18 @@ int parse_arguments(int argc, char **argv, AppConfig *config)
     return 1;
 }
 
+/* SQL 파일 전체를 읽어 실행용 문자열 버퍼에 적재한다.
+ *
+ * 입력:
+ * - path: 읽을 SQL 파일 경로
+ * - buffer: 파일 내용을 저장할 문자 버퍼
+ * - buffer_size: buffer의 전체 크기
+ * - error: 실패 원인을 기록할 오류 구조체
+ * 출력:
+ * - 반환값: 읽기 성공 시 1, 파일 열기/읽기 실패 시 0
+ * - buffer: 성공 시 널 종료된 SQL 문자열이 저장됨
+ * - error: 실패 시 메시지가 채워짐
+ */
 int load_sql_file(const char *path, char *buffer, size_t buffer_size, ErrorInfo *error)
 {
     FILE *file;
@@ -114,6 +136,14 @@ int load_sql_file(const char *path, char *buffer, size_t buffer_size, ErrorInfo 
     return 1;
 }
 
+/* ErrorInfo에 담긴 내용을 사용자에게 보기 좋은 형식으로 출력한다.
+ *
+ * 입력:
+ * - error: 메시지와 위치 정보를 담은 오류 구조체
+ * 출력:
+ * - 반환값 없음
+ * - 표준 오류(stderr)에 오류 메시지와 필요 시 line/column 정보 출력
+ */
 void print_error(const ErrorInfo *error)
 {
     /*
@@ -139,6 +169,16 @@ void print_error(const ErrorInfo *error)
     fprintf(stderr, "오류: %s\n", error->message);
 }
 
+/* SQL 문자열 하나를 토큰화, 파싱, 실행까지 한 번에 처리한다.
+ *
+ * 입력:
+ * - config: 스키마/데이터 경로 등 실행 설정
+ * - sql_text: 실행할 SQL 문자열
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 실행 성공 시 1, 중간 단계 실패 시 0
+ * - error: 실패 단계의 메시지와 위치 정보가 채워질 수 있음
+ */
 static int run_sql_text(const AppConfig *config, const char *sql_text, ErrorInfo *error)
 {
     TokenList tokens;
@@ -163,6 +203,13 @@ static int run_sql_text(const AppConfig *config, const char *sql_text, ErrorInfo
     return execute_program(config, &program, error);
 }
 
+/* 대화형 입력 한 줄이 종료 명령인지 판별한다.
+ *
+ * 입력:
+ * - line: 사용자가 입력한 한 줄 문자열
+ * 출력:
+ * - 반환값: 종료 명령이면 1, 아니면 0
+ */
 static int is_exit_command(const char *line)
 {
     return strcmp(line, ".exit") == 0 ||
@@ -170,6 +217,14 @@ static int is_exit_command(const char *line)
            strcmp(line, "quit") == 0;
 }
 
+/* fgets로 읽은 줄 끝의 개행 문자를 제거한다.
+ *
+ * 입력:
+ * - line: 줄바꿈이 포함될 수 있는 입력 문자열 버퍼
+ * 출력:
+ * - 반환값 없음
+ * - line: 끝의 '\n', '\r'가 제거된 상태로 수정됨
+ */
 static void trim_line_end(char *line)
 {
     size_t length;
@@ -182,6 +237,14 @@ static void trim_line_end(char *line)
     }
 }
 
+/* interactive 모드에서 한 줄씩 SQL을 읽고 즉시 실행한다.
+ *
+ * 입력:
+ * - config: 스키마/데이터 경로를 포함한 실행 설정
+ * 출력:
+ * - 반환값: 사용자가 종료했거나 EOF를 만나면 0
+ * - 부가 효과: 프롬프트와 실행 결과를 표준 출력에 표시
+ */
 static int run_interactive_program(const AppConfig *config)
 {
     char line[SQLPROC_MAX_SQL_SIZE];
@@ -216,6 +279,14 @@ static int run_interactive_program(const AppConfig *config)
     }
 }
 
+/* 설정에 따라 파일 실행 모드 또는 interactive 모드를 시작한다.
+ *
+ * 입력:
+ * - config: parse_arguments가 채운 실행 설정
+ * 출력:
+ * - 반환값: 성공 시 0, 오류 발생 시 1
+ * - 부가 효과: SQL 파일 실행 또는 대화형 루프 수행
+ */
 int run_program(const AppConfig *config)
 {
     char sql_text[SQLPROC_MAX_SQL_SIZE];

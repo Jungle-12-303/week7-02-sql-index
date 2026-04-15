@@ -10,11 +10,21 @@
  * storage.c는 CSV 파일 저장과 조회를 담당하는 얇은 스토리지 계층입니다.
  * 실행기는 "무슨 데이터를 읽고 쓸지"만 결정하고,
  * 실제 파일 경로/헤더/행 입출력은 이 모듈에 맡깁니다.
+ * 이 파일에서 row offset은 "몇 번째 행"이 아니라 "파일 안에서 그 행이 시작하는 바이트 위치"입니다.
  */
 
 #define STORAGE_MAX_PATH_LEN 512
 #define STORAGE_MAX_ROW_LEN SQLPROC_MAX_CSV_ROW_LEN
 
+/* 파일 입출력 계층 오류 메시지를 ErrorInfo에 기록한다.
+ *
+ * 입력:
+ * - error: 오류 정보를 저장할 구조체
+ * - message: 사용자에게 보여 줄 오류 메시지
+ * 출력:
+ * - 반환값 없음
+ * - error: 파일 단위 오류 메시지로 갱신됨
+ */
 static void set_file_error(ErrorInfo *error, const char *message)
 {
     /* 파일 시스템/CSV 형식 오류는 SQL 위치 없이 메시지만 기록합니다. */
@@ -23,6 +33,18 @@ static void set_file_error(ErrorInfo *error, const char *message)
     error->column = 0;
 }
 
+/* base_dir, table_name, 확장자를 합쳐 실제 CSV 경로를 만든다.
+ *
+ * 입력:
+ * - dest: 경로 문자열을 저장할 버퍼
+ * - dest_size: dest의 크기
+ * - base_dir: data 디렉터리 경로
+ * - table_name: 테이블 이름
+ * - extension: ".csv" 같은 파일 확장자
+ * 출력:
+ * - 반환값 없음
+ * - dest: 완성된 파일 경로가 저장됨
+ */
 static void build_table_path(char *dest,
                              size_t dest_size,
                              const char *base_dir,
@@ -33,6 +55,18 @@ static void build_table_path(char *dest,
     snprintf(dest, dest_size, "%s/%s%s", base_dir, table_name, extension);
 }
 
+/* fgets로 읽은 한 줄이 버퍼를 넘치지 않았는지 확인한다.
+ *
+ * 입력:
+ * - line: 방금 읽은 줄 문자열
+ * - line_size: line 버퍼 크기
+ * - file: 읽기 중인 파일 포인터
+ * - error: 실패 시 오류를 기록할 구조체
+ * - message: 줄이 너무 길 때 사용할 오류 메시지
+ * 출력:
+ * - 반환값: 정상 길이면 1, 잘린 줄이면 0
+ * - error: 실패 시 메시지가 기록됨
+ */
 static int validate_line_length(const char *line,
                                 size_t line_size,
                                 FILE *file,
@@ -54,6 +88,16 @@ static int validate_line_length(const char *line,
     return 1;
 }
 
+/* CSV 한 줄을 컬럼 값 배열로 분해한다.
+ *
+ * 입력:
+ * - line: 파싱할 CSV 한 줄
+ * - values: 파싱 결과를 저장할 2차원 문자열 배열
+ * - value_count: 실제 읽은 컬럼 수를 저장할 포인터
+ * 출력:
+ * - 반환값: 파싱 성공 시 1, 형식 또는 길이 오류 시 0
+ * - values/value_count: 성공 시 각 컬럼 문자열과 개수가 채워짐
+ */
 static int parse_csv_line(const char *line,
                           char values[SQLPROC_MAX_COLUMNS][SQLPROC_MAX_VALUE_LEN],
                           int *value_count)
@@ -74,6 +118,11 @@ static int parse_csv_line(const char *line,
         }
 
         if (line[i] == '"') {
+            /*
+             * CSV 안의 "" 는 실제 큰따옴표 1개를 뜻합니다.
+             * in_quotes 상태에서 연속 따옴표를 만나면 값에 '"' 하나를 넣고
+             * 입력 포인터를 한 칸 더 넘깁니다.
+             */
             if (in_quotes && line[i + 1] != '\0' && line[i + 1] == '"') {
                 if (text_index >= SQLPROC_MAX_VALUE_LEN - 1) {
                     return 0;
@@ -113,6 +162,15 @@ static int parse_csv_line(const char *line,
     return 1;
 }
 
+/* 문자열 1개를 CSV 규칙에 맞게 이스케이프하여 파일에 쓴다.
+ *
+ * 입력:
+ * - file: 출력 대상 파일 포인터
+ * - text: 저장할 필드 문자열
+ * 출력:
+ * - 반환값: 쓰기 성공 시 1, 파일 쓰기 실패 시 0
+ * - 부가 효과: file에 CSV 안전 형식으로 기록됨
+ */
 static int write_csv_field(FILE *file, const char *text)
 {
     int needs_quote;
@@ -153,6 +211,16 @@ static int write_csv_field(FILE *file, const char *text)
     return fputc('"', file) != EOF;
 }
 
+/* 컬럼 값 배열 한 줄을 CSV 행으로 출력한다.
+ *
+ * 입력:
+ * - file: 출력 대상 파일 포인터
+ * - values: 저장할 컬럼 문자열 배열
+ * - value_count: 저장할 컬럼 개수
+ * 출력:
+ * - 반환값: 쓰기 성공 시 1, 실패 시 0
+ * - 부가 효과: file에 CSV 한 줄이 추가됨
+ */
 static int write_csv_row(FILE *file,
                          char values[SQLPROC_MAX_COLUMNS][SQLPROC_MAX_VALUE_LEN],
                          int value_count)
@@ -175,6 +243,14 @@ static int write_csv_row(FILE *file,
     return fputc('\n', file) != EOF;
 }
 
+/* append 전에 파일 끝이 개행으로 끝나는지 보장한다.
+ *
+ * 입력:
+ * - file: append 모드로 열린 파일 포인터
+ * 출력:
+ * - 반환값: 준비 성공 시 1, fseek/쓰기 실패 시 0
+ * - 부가 효과: 필요하면 파일 끝에 '\n'이 추가됨
+ */
 static int ensure_append_starts_on_new_line(FILE *file)
 {
     long file_size;
@@ -217,6 +293,19 @@ static int ensure_append_starts_on_new_line(FILE *file)
     return fseek(file, 0, SEEK_END) == 0;
 }
 
+/* CSV 헤더 컬럼 수와 순서가 스키마와 일치하는지 확인한다.
+ *
+ * 입력:
+ * - schema: 기준이 되는 테이블 스키마
+ * - header_values: CSV 헤더를 파싱한 컬럼 이름 배열
+ * - header_count: 헤더 컬럼 개수
+ * - error: 실패 시 오류를 기록할 구조체
+ * - count_message: 컬럼 수 불일치 시 메시지
+ * - order_message: 컬럼 순서 불일치 시 메시지
+ * 출력:
+ * - 반환값: 헤더가 일치하면 1, 아니면 0
+ * - error: 실패 시 원인 메시지가 기록됨
+ */
 static int validate_header_values(const TableSchema *schema,
                                   char header_values[SQLPROC_MAX_COLUMNS][SQLPROC_MAX_VALUE_LEN],
                                   int header_count,
@@ -241,6 +330,16 @@ static int validate_header_values(const TableSchema *schema,
     return 1;
 }
 
+/* 테이블 CSV 파일이 존재하고 스키마 헤더와 맞는지 보장한다.
+ *
+ * 입력:
+ * - config: data 디렉터리 정보
+ * - schema: 대상 테이블 스키마
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 준비 성공 시 1, 파일/헤더 오류 시 0
+ * - 부가 효과: 파일이 없으면 새 CSV를 만들고 헤더를 기록함
+ */
 static int ensure_data_file(const AppConfig *config,
                             const TableSchema *schema,
                             ErrorInfo *error)
@@ -326,6 +425,16 @@ static int ensure_data_file(const AppConfig *config,
     return 1;
 }
 
+/* SELECT 결과 첫 줄에 선택된 컬럼 헤더를 출력한다.
+ *
+ * 입력:
+ * - schema: 대상 테이블 스키마
+ * - selected_indices: 출력할 컬럼 인덱스 배열
+ * - selected_count: 출력할 컬럼 개수
+ * 출력:
+ * - 반환값 없음
+ * - 표준 출력(stdout)에 탭 구분 헤더가 출력됨
+ */
 static void print_selected_header(const TableSchema *schema,
                                   const int selected_indices[SQLPROC_MAX_COLUMNS],
                                   int selected_count)
@@ -344,6 +453,18 @@ static void print_selected_header(const TableSchema *schema,
     fputc('\n', stdout);
 }
 
+/* CSV 파일 끝에 한 행을 추가하고 그 시작 오프셋을 돌려준다.
+ *
+ * 입력:
+ * - config: data 디렉터리 정보
+ * - schema: 대상 테이블 스키마
+ * - row_values: 스키마 순서로 정리된 행 값 배열
+ * - out_offset: 기록된 행의 시작 오프셋을 저장할 포인터, NULL 허용
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: append 성공 시 1, 실패 시 0
+ * - out_offset: 성공 시 새 행 시작 파일 위치가 저장됨
+ */
 int storage_append_row(const AppConfig *config,
                        const TableSchema *schema,
                        char row_values[SQLPROC_MAX_COLUMNS][SQLPROC_MAX_VALUE_LEN],
@@ -393,6 +514,18 @@ int storage_append_row(const AppConfig *config,
     return 1;
 }
 
+/* WHERE 없는 SELECT를 위해 CSV 전체 행을 처음부터 끝까지 출력한다.
+ *
+ * 입력:
+ * - config: data 디렉터리 정보
+ * - schema: 대상 테이블 스키마
+ * - selected_indices: 출력할 컬럼 인덱스 배열
+ * - selected_count: 출력할 컬럼 개수
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 출력 성공 시 1, 파일/CSV 형식 오류 시 0
+ * - 부가 효과: 표준 출력(stdout)에 헤더와 데이터 행이 출력됨
+ */
 int storage_print_rows(const AppConfig *config,
                        const TableSchema *schema,
                        const int selected_indices[SQLPROC_MAX_COLUMNS],
@@ -495,6 +628,19 @@ int storage_print_rows(const AppConfig *config,
     return 1;
 }
 
+/* 특정 row offset으로 바로 이동해 한 행만 읽고 출력한다.
+ *
+ * 입력:
+ * - config: data 디렉터리 정보
+ * - schema: 대상 테이블 스키마
+ * - offset: 읽을 행의 시작 파일 위치, 음수면 결과 없음으로 처리
+ * - selected_indices: 출력할 컬럼 인덱스 배열
+ * - selected_count: 출력할 컬럼 개수
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 출력 성공 시 1, 파일/CSV 형식 오류 시 0
+ * - 부가 효과: 표준 출력(stdout)에 헤더와 필요 시 한 행이 출력됨
+ */
 int storage_print_row_at_offset(const AppConfig *config,
                                 const TableSchema *schema,
                                 long offset,
@@ -601,6 +747,19 @@ int storage_print_row_at_offset(const AppConfig *config,
     return 1;
 }
 
+/* CSV 한 행 값이 WHERE 조건과 일치하는지 비교한다.
+ *
+ * 입력:
+ * - schema: 대상 테이블 스키마
+ * - values: 현재 행의 컬럼 문자열 배열
+ * - where_column_index: 비교할 컬럼 인덱스
+ * - where_operator: 비교 연산자
+ * - where_value: SQL WHERE 리터럴 값
+ * - matches: 비교 결과를 저장할 포인터
+ * 출력:
+ * - 반환값: 비교 자체가 가능하면 1, 형식 오류면 0
+ * - matches: 성공 시 조건 만족 여부가 1 또는 0으로 저장됨
+ */
 static int csv_value_matches_where(const TableSchema *schema,
                                    const char values[SQLPROC_MAX_COLUMNS][SQLPROC_MAX_VALUE_LEN],
                                    int where_column_index,
@@ -672,6 +831,21 @@ static int csv_value_matches_where(const TableSchema *schema,
     return 0;
 }
 
+/* WHERE 조건이 있는 SELECT를 위해 CSV를 선형 탐색하며 일치 행만 출력한다.
+ *
+ * 입력:
+ * - config: data 디렉터리 정보
+ * - schema: 대상 테이블 스키마
+ * - selected_indices: 출력할 컬럼 인덱스 배열
+ * - selected_count: 출력할 컬럼 개수
+ * - where_column_index: 비교할 컬럼 인덱스
+ * - where_operator: 비교 연산자
+ * - where_value: 비교 기준 리터럴
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 출력 성공 시 1, 파일/CSV 형식 오류 시 0
+ * - 부가 효과: 표준 출력(stdout)에 헤더와 조건 일치 행이 출력됨
+ */
 int storage_print_rows_where_equals(const AppConfig *config,
                                     const TableSchema *schema,
                                     const int selected_indices[SQLPROC_MAX_COLUMNS],
@@ -788,6 +962,19 @@ int storage_print_rows_where_equals(const AppConfig *config,
     return 1;
 }
 
+/* 이미 열린 CSV 파일에서 offset 위치의 한 행을 읽어 출력한다.
+ *
+ * 입력:
+ * - file: 헤더를 이미 읽은 상태의 열린 파일 포인터
+ * - schema: 대상 테이블 스키마
+ * - offset: 읽을 행의 시작 파일 위치
+ * - selected_indices: 출력할 컬럼 인덱스 배열
+ * - selected_count: 출력할 컬럼 개수
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 출력 성공 시 1, 파일/CSV 형식 오류 시 0
+ * - 부가 효과: 표준 출력(stdout)에 선택 컬럼 값이 한 줄 출력됨
+ */
 static int print_row_from_open_file(FILE *file,
                                     const TableSchema *schema,
                                     long offset,
@@ -837,6 +1024,20 @@ static int print_row_from_open_file(FILE *file,
     return 1;
 }
 
+/* 여러 row offset 목록을 따라 필요한 행들만 순서대로 출력한다.
+ *
+ * 입력:
+ * - config: data 디렉터리 정보
+ * - schema: 대상 테이블 스키마
+ * - offsets: 읽을 행 시작 위치 배열
+ * - offset_count: offsets 개수
+ * - selected_indices: 출력할 컬럼 인덱스 배열
+ * - selected_count: 출력할 컬럼 개수
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 출력 성공 시 1, 파일/CSV 형식 오류 시 0
+ * - 부가 효과: 표준 출력(stdout)에 헤더와 여러 행이 출력됨
+ */
 int storage_print_rows_at_offsets(const AppConfig *config,
                                   const TableSchema *schema,
                                   const long offsets[],
@@ -910,6 +1111,18 @@ int storage_print_rows_at_offsets(const AppConfig *config,
     return 1;
 }
 
+/* 특정 int 컬럼을 스캔해 최댓값을 찾는다.
+ *
+ * 입력:
+ * - config: data 디렉터리 정보
+ * - schema: 대상 테이블 스키마
+ * - column_index: 최댓값을 찾을 int 컬럼 인덱스
+ * - max_value: 결과를 저장할 포인터
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 탐색 성공 시 1, 파일/CSV 형식 오류 시 0
+ * - max_value: 성공 시 찾은 최댓값, 파일이 없거나 비어 있으면 0
+ */
 int storage_find_max_int_value(const AppConfig *config,
                                const TableSchema *schema,
                                int column_index,
@@ -1017,6 +1230,19 @@ int storage_find_max_int_value(const AppConfig *config,
     return 1;
 }
 
+/* 특정 int 컬럼에 target 값이 이미 존재하는지 선형 탐색으로 확인한다.
+ *
+ * 입력:
+ * - config: data 디렉터리 정보
+ * - schema: 대상 테이블 스키마
+ * - column_index: 검사할 int 컬럼 인덱스
+ * - target_value: 찾을 값
+ * - exists: 존재 여부를 저장할 포인터
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 탐색 성공 시 1, 파일/CSV 형식 오류 시 0
+ * - exists: 성공 시 값 존재 여부가 1 또는 0으로 저장됨
+ */
 int storage_int_value_exists(const AppConfig *config,
                              const TableSchema *schema,
                              int column_index,
@@ -1124,6 +1350,19 @@ int storage_int_value_exists(const AppConfig *config,
     return 1;
 }
 
+/* CSV 전체를 다시 읽어 메모리 기반 PK 인덱스를 재구성한다.
+ *
+ * 입력:
+ * - config: data 디렉터리 정보
+ * - schema: 대상 테이블 스키마
+ * - index: 다시 채울 B+ Tree 인덱스
+ * - max_value: 읽은 PK 최댓값을 저장할 포인터
+ * - error: 실패 시 오류를 기록할 구조체
+ * 출력:
+ * - 반환값: 재구성 성공 시 1, 파일/CSV/중복 PK 오류 시 0
+ * - index: 성공 시 모든 PK -> row offset 쌍이 삽입됨
+ * - max_value: 성공 시 가장 큰 PK 값이 저장됨
+ */
 int storage_rebuild_pk_index(const AppConfig *config,
                              const TableSchema *schema,
                              BPlusTree *index,
@@ -1200,6 +1439,11 @@ int storage_rebuild_pk_index(const AppConfig *config,
         long existing_offset;
         int value_count;
 
+        /*
+         * ftell은 "다음 fgets가 읽을 행의 시작 위치"를 알려 줍니다.
+         * 그래서 먼저 현재 위치를 저장한 뒤 그 다음 줄을 읽어야
+         * PK -> CSV row offset 매핑이 정확해집니다.
+         */
         row_offset = ftell(file);
         if (row_offset < 0) {
             fclose(file);
