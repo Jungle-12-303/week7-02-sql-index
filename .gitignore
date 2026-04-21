@@ -53,3 +53,8 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# Project build output
+build/
+.DS_Store
+bench-users.csv
