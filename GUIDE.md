@@ -42,27 +42,37 @@ SELECT * FROM users;
 
 -- 특정 컬럼만 조회
 SELECT name, age FROM users;
+
+-- 단일 WHERE 조건
+SELECT * FROM users WHERE id = 2;
+SELECT name FROM users WHERE name = 'kim';
+SELECT * FROM users WHERE id > 100;
+SELECT id, name FROM users WHERE age != 20;
 ```
 
 지원하지 않는 SQL (의도적으로 제외):
 
 ```sql
--- WHERE, JOIN, ORDER BY, UPDATE, DELETE 등은 미구현
-SELECT * FROM users WHERE age >= 20;   -- ✗
+-- AND, OR, JOIN, ORDER BY, UPDATE, DELETE 등은 미구현
+SELECT * FROM users WHERE age >= 20;   -- ✗, >= 연산자는 미지원
+SELECT * FROM users WHERE name = 'kim' AND age = 20; -- ✗
 ```
 
 - 스키마에 `id:int` 컬럼이 있으면 PK로 인식합니다.
 - `INSERT`에서 `id`를 빼면 현재 CSV의 최대 `id` + 1을 자동으로 넣습니다.
 - 같은 PK를 다시 넣으면 `PK 값이 이미 존재합니다.` 오류를 반환합니다.
+- `WHERE id = 값`, `WHERE id > 값`, `WHERE id < 값`은 B+ Tree 인덱스를 사용합니다.
+- PK가 아닌 컬럼 조건과 `!=` 조건은 CSV 선형 탐색을 사용합니다.
 
 ---
 
 ## 2. 디렉토리 구조
 
 ```
-week6-team5-sql/
+week7-02-sql-index/
 ├── include/
-│   └── sqlproc.h       ← 모든 .c 파일이 공유하는 "공용 계약"
+│   ├── sqlproc.h       ← 모든 .c 파일이 공유하는 "공용 계약"
+│   └── bptree.h        ← B+ Tree 공개 API
 ├── src/
 │   ├── main.c          ← 프로그램 시작점 (진입점)
 │   ├── app.c           ← 명령줄 인자 파싱, 파일/interactive 실행
@@ -71,13 +81,18 @@ week6-team5-sql/
 │   ├── parser.c        ← 토큰 → SQL 문장 구조체
 │   ├── schema.c        ← 테이블 스키마 파일 읽기
 │   ├── executor.c      ← SQL 검증 및 실행 흐름 제어
-│   └── storage.c       ← CSV 파일 경로·헤더·행 입출력, PK helper scan
+│   ├── storage.c       ← CSV 파일 경로·헤더·행 입출력, 인덱스 재구성
+│   └── bptree.c        ← 메모리 기반 B+ Tree 구현
 ├── tests/
 │   └── test_runner.c   ← 통합 테스트
+├── benchmarks/
+│   └── bench_index.c   ← 대량 CSV 생성 보조 도구
 ├── examples/
 │   ├── schemas/
 │   │   └── users.schema
 │   ├── demo.sql
+│   ├── index_demo.sql
+│   ├── perf_compare.sql
 │   ├── live.sql
 │   └── user_input.sql
 └── Makefile
@@ -88,7 +103,7 @@ week6-team5-sql/
 ```
 sqlproc.h               (설계도 — 구조체, 함수 선언)
     ↑ #include
-tokenizer.c  parser.c  executor.c  storage.c ...  (실제 구현체)
+tokenizer.c  parser.c  executor.c  storage.c  bptree.c ...  (실제 구현체)
 ```
 
 > **비유**: `.h`는 레스토랑 메뉴판(무슨 요리가 있는지), `.c`는 주방(요리를 실제로 만드는 곳).
@@ -104,8 +119,11 @@ flowchart TD
     C --> D["parser.c\n토큰 → SQL 문장 구조체"]
     D --> E["executor.c\nSQL 검증 및 실행 흐름 제어"]
     E --> F["schema.c\n스키마 파일 읽기"]
-    E -->|"storage_append_row()\nstorage_print_rows()\nPK helper"| H["storage.c\nCSV 파일 입출력"]
+    E -->|"storage_append_row()\nstorage_print_rows()\nstorage_rebuild_pk_index()"| H["storage.c\nCSV 파일 입출력"]
+    E --> I["bptree.c\n메모리 PK 인덱스"]
     H --> G[("CSV 파일\n데이터 저장/읽기")]
+    G -. "최초 접근 시 rebuild" .-> I
+    I -. "id -> offset" .-> H
 
     style A fill:#e8f5e9
     style G fill:#fff9c4
@@ -161,11 +179,13 @@ graph LR
         E["executor.c\nSQL 검증·실행 제어"]
         F["schema.c\n스키마 로더"]
         G["storage.c\nCSV 파일 입출력"]
+        H["bptree.c\nPK 인덱스"]
     end
 
     A --> B --> C --> D --> E
     E --> F
     E --> G
+    E --> H
 ```
 
 | 파일 | 주요 함수 | 한 줄 설명 |
@@ -176,8 +196,9 @@ graph LR
 | `tokenizer.c` | `tokenize_sql()` | 문자열을 `TokenList`로 변환 |
 | `parser.c` | `parse_program()` | `TokenList`를 `SqlProgram`으로 변환 |
 | `schema.c` | `load_table_schema()` | `.schema` 파일 읽어 `TableSchema` 반환 |
-| `executor.c` | `execute_program()` | SQL 타입·이름 검증, PK 자동 발급·중복 검사, storage.c 호출 |
-| `storage.c` | `storage_append_row()`, `storage_print_rows()`, `storage_find_max_int_value()`, `storage_int_value_exists()` | CSV 경로·헤더·행 읽기/쓰기와 PK helper scan |
+| `executor.c` | `execute_program()` | SQL 타입·이름 검증, PK 자동 발급·중복 검사, 인덱스/스캔 분기 |
+| `storage.c` | `storage_append_row()`, `storage_print_rows()`, `storage_print_row_at_offset()`, `storage_print_rows_where_equals()`, `storage_rebuild_pk_index()` | CSV 경로·헤더·행 읽기/쓰기, offset 기반 출력, PK 인덱스 재구성 |
+| `bptree.c` | `bptree_insert()`, `bptree_search()`, `bptree_visit_greater_than()`, `bptree_visit_less_than()` | `id -> CSV row offset` 메모리 인덱스 |
 
 ---
 
@@ -217,8 +238,13 @@ typedef enum {
     TOKEN_KEYWORD_INSERT,   // INSERT
     TOKEN_KEYWORD_INTO,     // INTO
     TOKEN_KEYWORD_VALUES,   // VALUES
+    TOKEN_EQUAL,            // =
+    TOKEN_GREATER,          // >
+    TOKEN_LESS,             // <
+    TOKEN_BANG_EQUAL,       // !=
     TOKEN_KEYWORD_SELECT,   // SELECT
-    TOKEN_KEYWORD_FROM      // FROM
+    TOKEN_KEYWORD_FROM,     // FROM
+    TOKEN_KEYWORD_WHERE     // WHERE
 } TokenType;
 
 /* 파서가 구분하는 SQL 문장 종류 */
@@ -226,6 +252,14 @@ typedef enum {
     STATEMENT_INSERT,
     STATEMENT_SELECT
 } StatementType;
+
+/* WHERE 비교 연산자 */
+typedef enum {
+    WHERE_OP_EQUAL,
+    WHERE_OP_GREATER,
+    WHERE_OP_LESS,
+    WHERE_OP_NOT_EQUAL
+} WhereOperator;
 ```
 
 ### 핵심 구조체 관계도
@@ -255,6 +289,10 @@ classDiagram
         int select_all
         int column_count
         char column_names[16][64]
+        int has_where
+        char where_column[64]
+        WhereOperator where_operator
+        LiteralValue where_value
     }
     class TableSchema {
         char table_name[64]
@@ -386,7 +424,10 @@ flowchart TD
     F --> H["consume(FROM)"]
     G --> H
     H --> I["테이블명 읽기\nparse_identifier()"]
-    I --> J[완료]
+    I --> J{"WHERE 있음?"}
+    J -- 예 --> K["컬럼명, 연산자, 리터럴 읽기"]
+    J -- 아니오 --> L[완료]
+    K --> L
 ```
 
 **INSERT 파싱 흐름:**
@@ -416,13 +457,19 @@ flowchart LR
         E1["타입·이름 검증"]
         E2["컬럼 순서 재배치"]
         E3["PK 자동 발급·중복 검사"]
+        E4["인덱스 조회 / 선형 탐색 분기"]
     end
     subgraph storage["storage.c — 파일 입출력"]
         S1["CSV 헤더 생성·검증"]
         S2["행 읽기·쓰기"]
-        S3["최대 PK / 중복 PK 확인"]
+        S3["row offset 기반 출력"]
     end
-    executor -->|"storage_append_row()\nstorage_print_rows()\nstorage_find_max_int_value()\nstorage_int_value_exists()"| storage
+    subgraph index["bptree.c — 메모리 인덱스"]
+        B1["id -> row offset"]
+        B2["exact lookup / range scan"]
+    end
+    executor -->|"storage_append_row()\nstorage_print_rows()\nstorage_rebuild_pk_index()"| storage
+    executor -->|"bptree_insert()\nbptree_search()"| index
 ```
 
 **INSERT 실행 흐름:**
@@ -433,11 +480,13 @@ flowchart TD
     B --> C["build_insert_row_values()\n구조체 값을 스키마 순서로 정렬"]
     C --> D["필요 시 PK 자동 발급\n중복 PK 검사"]
     D --> E["storage_append_row()"]
+    E --> I["bptree_insert()\nid -> row offset 등록"]
 
     subgraph storage_detail["storage.c 내부"]
         E --> F["ensure_data_file()\nCSV 없으면 헤더 생성, 있으면 헤더 검증"]
         F --> G["fopen(path, 'a+b')\n추가 모드로 열기"]
-        G --> H["write_csv_row()\nCSV 끝에 행 추가"]
+        G --> H["ftell()로 row offset 확보"]
+        H --> J["write_csv_row()\nCSV 끝에 행 추가"]
     end
 ```
 
@@ -463,7 +512,7 @@ INSERT INTO users (name, age) VALUES ('lee', 30);
 ```
 
 - `schema->primary_key_index >= 0`이면 `id:int` 컬럼이 존재한다는 뜻입니다.
-- 이 경우 `execute_insert()`는 저장 전에 현재 최대 PK를 읽고, 같은 PK가 있는지도 한 번 더 확인합니다.
+- 이 경우 `execute_insert()`는 런타임 상태의 `next_id`를 사용하고, 저장 전에 B+ Tree로 같은 PK가 있는지도 확인합니다.
 
 **SELECT 실행 흐름:**
 
@@ -471,18 +520,24 @@ INSERT INTO users (name, age) VALUES ('lee', 30);
 flowchart TD
     A["execute_select()"] --> B["load_table_schema()\n스키마 파일 읽기"]
     B --> C["resolve_selected_columns()\nSELECT * 또는 컬럼명 → 스키마 인덱스 배열"]
-    C --> D["storage_print_rows()"]
+    C --> D{"WHERE 있음?"}
+    D -- 없음 --> E["storage_print_rows()\n전체 출력"]
+    D -- "id = 값" --> F["[INDEX]\nbptree_search()"]
+    D -- "id > 값 / id < 값" --> G["[INDEX-RANGE]\nleaf range scan"]
+    D -- 그 외 --> H["[SCAN]\nstorage_print_rows_where_equals()"]
 
     subgraph storage_detail["storage.c 내부"]
-        D --> E{"CSV 파일 없음?"}
-        E -- ENOENT --> F["헤더만 출력하고 종료\n빈 테이블 처리"]
-        E -- 정상 --> G["헤더 행 읽기\n스키마와 일치 확인"]
-        G --> H["print_selected_header()\n선택 컬럼명 출력"]
-        H --> I["행 반복: fgets()"]
-        I --> J["parse_csv_line()\nCSV 행 파싱"]
-        J --> K["선택 컬럼만 탭 구분 출력"]
-        K --> I
-        I -- EOF --> L[완료]
+        E --> I{"CSV 파일 없음?"}
+        I -- ENOENT --> J["헤더만 출력하고 종료\n빈 테이블 처리"]
+        I -- 정상 --> K["헤더 행 읽기\n스키마와 일치 확인"]
+        K --> L["print_selected_header()\n선택 컬럼명 출력"]
+        L --> M["행 반복: fgets()"]
+        M --> N["parse_csv_line()\nCSV 행 파싱"]
+        N --> O["선택 컬럼만 탭 구분 출력"]
+        O --> M
+        F --> P["storage_print_row_at_offset()"]
+        G --> Q["storage_print_rows_at_offsets()"]
+        H --> R["CSV 전체 scan 후 조건 비교"]
     end
 ```
 
@@ -724,7 +779,9 @@ id	name
 6. src/schema.c            ← load_table_schema() 함수 (15분)
 7. src/executor.c          ← execute_insert(), PK 자동 발급 흐름 (20분)
 8. src/storage.c           ← storage_append_row(), storage_print_rows(),
-                              storage_find_max_int_value() (20분)
+                              storage_rebuild_pk_index() (20분)
+9. src/bptree.c            ← bptree_insert(), bptree_search(),
+                              range scan 함수 (20분)
 ```
 
 > executor.c와 storage.c는 함께 읽는 것을 권장합니다.  

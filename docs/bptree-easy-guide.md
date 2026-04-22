@@ -248,7 +248,7 @@ flowchart LR
 이 동작은 [src/bptree.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/bptree.c:191)
 의 `insert_into_leaf()`에서 확인할 수 있고, 테스트도 있습니다.
 
-- [tests/test_runner.c](/Users/donghyunkim/Documents/week7-02-sql-index/tests/test_runner.c:594)
+- [tests/test_runner.c](/Users/donghyunkim/Documents/week7-02-sql-index/tests/test_runner.c:773)
 
 ## range scan은 왜 leaf 연결이 필요할까
 
@@ -443,7 +443,7 @@ flowchart LR
 
 ## 테스트는 어떻게 보면 좋나
 
-B+ Tree 관련 테스트는 [tests/test_runner.c](/Users/donghyunkim/Documents/week7-02-sql-index/tests/test_runner.c:542)
+B+ Tree 관련 테스트는 [tests/test_runner.c](/Users/donghyunkim/Documents/week7-02-sql-index/tests/test_runner.c:721)
 부터 읽으면 됩니다.
 
 | 테스트 | 확인하는 것 |
@@ -488,7 +488,7 @@ internal node끼리는 좌우 순회가 필요하지 않습니다.
 3. [src/bptree.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/bptree.c:366) 의 `bptree_search()`
 4. [src/storage.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/storage.c:1127) 의 `storage_rebuild_pk_index()`
 5. [src/executor.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/executor.c:562) 의 `execute_select_with_index()`
-6. [tests/test_runner.c](/Users/donghyunkim/Documents/week7-02-sql-index/tests/test_runner.c:542) 의 테스트
+6. [tests/test_runner.c](/Users/donghyunkim/Documents/week7-02-sql-index/tests/test_runner.c:721) 의 테스트
 
 이 순서로 읽으면 "자료구조 단독 이해 -> 프로젝트 연결 -> 테스트 확인" 순서가
 잡혀서 훨씬 편합니다.

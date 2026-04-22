@@ -5,7 +5,7 @@
   <circle cx="112" cy="96" r="12" fill="#FF5F57"/>
   <circle cx="148" cy="96" r="12" fill="#FEBC2E"/>
   <circle cx="184" cy="96" r="12" fill="#28C840"/>
-  <text x="218" y="106" fill="#5A5A5A" font-family="Menlo, Monaco, monospace" font-size="22" font-weight="700">week6-team5-sql - demo run</text>
+  <text x="218" y="106" fill="#5A5A5A" font-family="Menlo, Monaco, monospace" font-size="22" font-weight="700">week7-02-sql-index - demo run</text>
 
   <text x="110" y="190" fill="#39D353" font-family="Menlo, Monaco, monospace" font-size="22">&gt;</text>
   <text x="140" y="190" fill="#111111" font-family="Menlo, Monaco, monospace" font-size="22">make</text>

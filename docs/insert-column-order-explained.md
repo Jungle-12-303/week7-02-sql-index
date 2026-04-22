@@ -76,7 +76,7 @@ id   -> 20
 name -> yoon
 ```
 
-관련 코드는 [parser.c](/Users/donghyunkim/Downloads/test_sql/week6-team5-sql/src/parser.c), 구조체 정의는 [sqlproc.h](/Users/donghyunkim/Downloads/test_sql/week6-team5-sql/include/sqlproc.h)에 있습니다.
+관련 코드는 [parser.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/parser.c), 구조체 정의는 [sqlproc.h](/Users/donghyunkim/Documents/week7-02-sql-index/include/sqlproc.h)에 있습니다.
 
 ## 3. 실행기가 하는 일
 
@@ -124,7 +124,7 @@ index 2 = 100
 
 가 됩니다.
 
-이 역할을 하는 핵심 함수는 [executor.c](/Users/donghyunkim/Downloads/test_sql/week6-team5-sql/src/executor.c)의 `build_insert_row_values`입니다.
+이 역할을 하는 핵심 함수는 [executor.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/executor.c)의 `build_insert_row_values`입니다.
 
 ## 4. 스토리지가 하는 일
 
@@ -160,7 +160,7 @@ sequenceDiagram
 - 컬럼 이름 해석은 실행기의 책임입니다.
 - 스토리지는 "이미 정렬된 한 줄"을 저장하는 책임에 집중합니다.
 
-관련 코드는 [storage.c](/Users/donghyunkim/Downloads/test_sql/week6-team5-sql/src/storage.c)입니다.
+관련 코드는 [storage.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/storage.c)입니다.
 
 ## 5. 초심자가 헷갈리기 쉬운 포인트
 

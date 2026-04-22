@@ -6,20 +6,25 @@
 
 ## 1. 프로젝트 목적
 
-- 프로젝트 이름: `week6-team5-sql`
-- 목표: `C99` 기반 파일형 SQL 처리기 구현
+- 프로젝트 이름: `week7-02-sql-index`
+- 목표: `C99` 기반 파일형 SQL 처리기에 메모리 기반 B+ Tree 인덱스 연결
 - 목표 저장 방식: `CSV`
 - 목표 실행 방식:
   - SQL 파일 실행 모드
   - interactive 모드
   - benchmark 모드
 
-## 2. 구현 필요 기능
+## 2. 구현된 핵심 기능
 
 - `INSERT`
 - `SELECT`
+- 단일 `WHERE` 조건: `=`, `>`, `<`, `!=`
 - CSV 헤더 자동 생성
 - 스토리지 인터페이스
+- `id:int` PK 자동 증가와 중복 방지
+- 메모리 기반 B+ Tree 인덱스
+- 프로그램 실행 중 테이블 최초 접근 시 CSV 기반 인덱스 재구성
+- PK exact lookup `[INDEX]`, PK range scan `[INDEX-RANGE]`, 비-PK scan `[SCAN]`
 
 ```mermaid
 flowchart TD
@@ -28,16 +33,24 @@ flowchart TD
     C --> D[parser.c<br>토큰 → 구조체]
     D --> E[executor.c<br>구조체 실행]
     E --> F[(CSV 파일<br>데이터 저장 및 읽기)]
+    E --> G[(메모리 B+ Tree<br>id → row offset)]
+    F -. 최초 접근 시 rebuild .-> G
+    G -. offset 조회 .-> F
     F --> E
 ```
 
-## 3. 지원 필요 SQL 구문 (예시)
+## 3. 지원 SQL 구문 (예시)
 
 ```sql
 INSERT INTO users VALUES (1, 'kim', 20);
 INSERT INTO users (id, name, age) VALUES (2, 'lee', 30);
+INSERT INTO users (name, age) VALUES ('park', 25);
 SELECT * FROM users;
 SELECT name, age FROM users;
+SELECT * FROM users WHERE id = 2;
+SELECT * FROM users WHERE id > 2;
+SELECT name FROM users WHERE name = 'kim';
+SELECT id, name FROM users WHERE age != 20;
 ```
 
 ## 4. 지원 범위와 제한
@@ -46,10 +59,15 @@ SELECT name, age FROM users;
 
 - 단일 테이블
 - 문자열 최대 길이 `63`
+- 스키마 타입: `int`, `string`
+- `WHERE column = value`
+- `WHERE column > value`, `WHERE column < value`
+- `WHERE column != value`
+- PK `id`의 `=`, `>`, `<` 조건은 B+ Tree 사용
+- PK가 아닌 컬럼 조건과 `!=` 조건은 CSV 선형 탐색 사용
 
 ### 구현하지 않을 내용
 
-- `WHERE`
 - `AND`
 - `OR`
 - `JOIN`
@@ -60,7 +78,7 @@ SELECT name, age FROM users;
 - `CREATE INDEX`
 - 복합 인덱스
 - 통계 기반 옵티마이저
-- Primary KEY
+- 명시적 Primary KEY 문법
 
 ## 5. 스키마와 데이터 형식
 
@@ -86,27 +104,39 @@ id:int,name:string,age:int
 
 ## 6. 주요 파일과 책임
 
-- [include/sqlproc.h](/Users/donghyunkim/Downloads/test_sql/week6-team5-sql/include/sqlproc.h)
-  공개 상수, 스키마 구조체, 함수 선언
-- [src/app.c](/Users/donghyunkim/Downloads/test_sql/week6-team5-sql/src/app.c)
-  인자 파싱, SQL 파일 실행
+- [include/sqlproc.h](/Users/donghyunkim/Documents/week7-02-sql-index/include/sqlproc.h)
+  공개 상수, 토큰/파서/스키마 구조체, 함수 선언
+- [include/bptree.h](/Users/donghyunkim/Documents/week7-02-sql-index/include/bptree.h)
+  B+ Tree 공개 API
+- [src/app.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/app.c)
+  인자 파싱, SQL 파일 실행, interactive/benchmark 모드 분기
 - [src/benchmark.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/benchmark.c)
   benchmark 프롬프트, 더미 데이터/SQL 생성, PK vs non-PK 시간 측정
-- [src/main.c](/Users/donghyunkim/Downloads/test_sql/week6-team5-sql/src/main.c)
+- [src/main.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/main.c)
   CLI 진입점
-- [src/tokenizer.c](/Users/donghyunkim/Downloads/test_sql/week6-team5-sql/src/tokenizer.c)
-  SQL 토큰화
-- [src/parser.c](/Users/donghyunkim/Downloads/test_sql/week6-team5-sql/src/parser.c)
-  수동 파서
-- [src/schema.c](/Users/donghyunkim/Downloads/test_sql/week6-team5-sql/src/schema.c)
+- [src/tokenizer.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/tokenizer.c)
+  SQL 토큰화, `WHERE`와 비교 연산자 토큰화
+- [src/parser.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/parser.c)
+  수동 파서, 단일 `WHERE` 조건 파싱
+- [src/schema.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/schema.c)
   `.schema` 로딩, 타입 해석
-- [src/executor.c](/Users/donghyunkim/Downloads/test_sql/week6-team5-sql/src/executor.c)
-  CSV 저장/조회
-- [tests/test_runner.c](/Users/donghyunkim/Downloads/test_sql/week6-team5-sql/tests/test_runner.c)
+- [src/executor.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/executor.c)
+  SQL 실행, PK 자동 증가/중복 방지, 인덱스/스캔 분기
+- [src/storage.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/storage.c)
+  CSV 저장/조회, row offset 기반 출력, PK 인덱스 재구성
+- [src/bptree.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/bptree.c)
+  B+ Tree 삽입/검색/range scan
+- [tests/test_runner.c](/Users/donghyunkim/Documents/week7-02-sql-index/tests/test_runner.c)
   전체 기능 테스트
-- [examples/demo.sql](/Users/donghyunkim/Downloads/test_sql/week6-team5-sql/examples/demo.sql)
+- [benchmarks/bench_index.c](/Users/donghyunkim/Documents/week7-02-sql-index/benchmarks/bench_index.c)
+  대량 CSV 생성용 보조 벤치마크 도구
+- [examples/demo.sql](/Users/donghyunkim/Documents/week7-02-sql-index/examples/demo.sql)
   배치 실행 예시
-- [examples/user_input.sql](/Users/donghyunkim/Downloads/test_sql/week6-team5-sql/examples/user_input.sql)
+- [examples/index_demo.sql](/Users/donghyunkim/Documents/week7-02-sql-index/examples/index_demo.sql)
+  인덱스/스캔 분기 시연 예시
+- [examples/perf_compare.sql](/Users/donghyunkim/Documents/week7-02-sql-index/examples/perf_compare.sql)
+  성능 비교용 조회 예시
+- [examples/user_input.sql](/Users/donghyunkim/Documents/week7-02-sql-index/examples/user_input.sql)
   사용자 입력 예시
 
 ## 7. 코드 스타일 규칙
@@ -205,7 +235,7 @@ make bench
 
 ### GitHub 정보
 
-- repo: `Jungle-12-303/week6-team5-sql`
+- repo: `Jungle-12-303/week7-02-sql-index`
 - Project URL:
   [6주차 5조 미니 SQL 처리기 보드](https://github.com/orgs/Jungle-12-303/projects/1/views/1)
 
@@ -294,63 +324,61 @@ make bench
 ## 16. 7주차 B+ Tree 인덱스 구현 브리프
 
 이번 주 과제는 기존 C99 기반 SQL 처리기에 메모리 기반 B+ Tree 인덱스를 연결하는 것입니다.
+현재 구현은 PK exact lookup뿐 아니라 PK `>`, `<` range scan까지 포함합니다.
 핵심 목표는 `WHERE id = ?` 단일 조건 조회에서 B+ Tree를 사용하고, 그 외 조회는 기존 CSV 선형 탐색 흐름을 유지하는 것입니다.
 
-### 구현 필요한 기능
+### 구현 상태
 
-- [ ] `INSERT`하는 경우 PK 값 자동 추가
-- [ ] PK에 대해 `SELECT`하는 경우 인덱스 기반 조회
-- [ ] 그 외 컬럼에 대해 `SELECT`하는 경우 선형 탐색
-- [ ] 인덱스는 B+ Tree 알고리즘으로 구현
-- [ ] 인덱스는 디스크 기반이 아닌 메모리 기반 방식으로 구현
-- [ ] 대량 데이터 1,000,000개 이상 레코드를 쉽게 `INSERT`할 수 있는 방법 제공
+- [x] `INSERT`하는 경우 PK 값 자동 추가
+- [x] PK에 대해 `SELECT`하는 경우 인덱스 기반 조회
+- [x] 그 외 컬럼에 대해 `SELECT`하는 경우 선형 탐색
+- [x] 인덱스는 B+ Tree 알고리즘으로 구현
+- [x] 인덱스는 디스크 기반이 아닌 메모리 기반 방식으로 구현
+- [x] 대량 데이터 1,000,000개 이상 레코드를 쉽게 생성하고 비교하는 benchmark 모드 제공
 
 ### 중점 포인트
 
-- [ ] `WHERE id = ?` 조건, 즉 단일 PK 조건일 때 B+ Tree를 어떻게 사용할지 명확히 구현
-- [ ] 대용량 레코드를 쉽게 생성하고 테스트할 수 있는 벤치마크 또는 데이터 생성 도구 마련
-- [ ] 이전 차수에서 만든 SQL 처리기와 자연스럽게 연결
+- [x] `WHERE id = ?` 조건, 즉 단일 PK 조건일 때 B+ Tree를 어떻게 사용할지 명확히 구현
+- [x] 대용량 레코드를 쉽게 생성하고 테스트할 수 있는 벤치마크 또는 데이터 생성 도구 마련
+- [x] 이전 차수에서 만든 SQL 처리기와 자연스럽게 연결
 
-### Codex에게 우선 시킬 일
+### 구현된 흐름
 
-1. 현재 SQL 처리기의 `INSERT`, `SELECT`, CSV 저장 흐름을 먼저 파악한다.
-2. B+ Tree를 독립 모듈로 구현한다.
-   - 추천 파일: `include/bptree.h`, `src/bptree.c`
-   - 기본 API: 생성, 삽입, 검색, 해제
-3. B+ Tree 단위 테스트를 먼저 작성한다.
-4. `INSERT` 시 자동 PK를 부여하고, `id -> CSV row offset`을 B+ Tree에 등록한다.
-5. `SELECT ... WHERE id = ?` 문법을 파서에 추가한다.
-6. 실행부에서 `WHERE id = ?`는 B+ Tree 검색을 사용하고, 그 외 조건은 CSV 선형 탐색을 사용한다.
-7. 1,000,000개 이상 레코드 삽입과 검색 성능 비교를 수행한다.
-8. README에 실행 방법, 테스트 방법, 성능 비교 결과를 발표용으로 정리한다.
+1. `INSERT` 시 `id`가 없으면 `next_id`로 자동 부여한다.
+2. CSV append 직전 `ftell()`로 row offset을 얻는다.
+3. append 성공 후 B+ Tree에 `id -> CSV row offset`을 등록한다.
+4. 프로그램 실행 중 테이블 최초 접근 시 CSV를 읽어 B+ Tree를 재구성한다.
+5. `SELECT ... WHERE id = 값`은 `[INDEX]` 경로로 조회한다.
+6. `SELECT ... WHERE id > 값`, `id < 값`은 `[INDEX-RANGE]` 경로로 조회한다.
+7. PK가 아닌 컬럼 조건과 `!=` 조건은 `[SCAN]` 경로로 조회한다.
 
 ### 테스트 대상
 
-- [ ] B+ Tree 단일 key 삽입 및 검색
-- [ ] B+ Tree 다중 key 삽입 및 검색
-- [ ] B+ Tree 노드 split 발생 케이스
-- [ ] 존재하지 않는 key 검색
-- [ ] PK 중복 삽입 방지 또는 중복 처리 정책 확인
-- [ ] `INSERT` 시 PK 자동 증가 확인
-- [ ] `SELECT * FROM table WHERE id = ?`가 인덱스를 사용하는지 확인
-- [ ] `SELECT * FROM table WHERE name = ?`처럼 PK가 아닌 조건은 선형 탐색하는지 확인
-- [ ] 기존 `SELECT * FROM table` 전체 조회가 깨지지 않는지 확인
-- [ ] 1,000,000개 이상 레코드 삽입 후 성능 측정
+- [x] B+ Tree 단일 key 삽입 및 검색
+- [x] B+ Tree 다중 key 삽입 및 검색
+- [x] B+ Tree 노드 split 발생 케이스
+- [x] 존재하지 않는 key 검색
+- [x] PK 중복 삽입 방지 또는 중복 처리 정책 확인
+- [x] `INSERT` 시 PK 자동 증가 확인
+- [x] `SELECT * FROM table WHERE id = ?`가 인덱스를 사용하는지 확인
+- [x] `SELECT * FROM table WHERE name = ?`처럼 PK가 아닌 조건은 선형 탐색하는지 확인
+- [x] 기존 `SELECT * FROM table` 전체 조회가 깨지지 않는지 확인
+- [x] 1,000,000개 이상 레코드 생성 후 성능 측정 경로 제공
 
 ### 수정 및 개선 후보
 
-- [ ] 실행 로그에 `[INDEX]` 또는 `[SCAN]`을 출력해 어떤 조회 방식이 사용됐는지 확인 가능하게 만들기
-- [ ] 성능 테스트 결과를 README 표로 정리하기
-- [ ] 인덱스 재구성 로직 추가: 프로그램 시작 시 CSV를 읽어 메모리 B+ Tree를 다시 만드는 방식 검토
+- [x] 실행 로그에 `[INDEX]`, `[INDEX-RANGE]`, `[SCAN]`을 출력해 어떤 조회 방식이 사용됐는지 확인 가능하게 만들기
+- [x] 성능 테스트 결과를 README 표로 정리하기
+- [x] 인덱스 재구성 로직 추가: 테이블 최초 접근 시 CSV를 읽어 메모리 B+ Tree를 다시 만드는 방식 적용
 
 ### 고민해 볼 추가 기능
 
 - [ ] CSV 파일 대신 바이너리 파일로 테이블 데이터 읽고 쓰기
 - [ ] `WHERE`에 `AND`, `OR`, `BETWEEN` 연산자 추가
 - [ ] 메모리 방식에 팀에서 만든 malloc lab 결과물을 적용할지 검토
-- [ ] PK에 대해 `WHERE`를 사용하는 경우 인덱스 기반 조회
-- [ ] 그 외 컬럼에 대해 `WHERE`를 사용하는 경우 선형 탐색
-- [ ] B+ Tree leaf node 연결을 활용한 range scan 구현
+- [x] PK에 대해 `WHERE`를 사용하는 경우 인덱스 기반 조회
+- [x] 그 외 컬럼에 대해 `WHERE`를 사용하는 경우 선형 탐색
+- [x] B+ Tree leaf node 연결을 활용한 range scan 구현
 
 ### 발표에서 강조할 내용
 

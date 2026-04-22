@@ -78,7 +78,7 @@ column_names[1] = "name"
 `SELECT *` 를 쓰면 컬럼 목록 대신 `select_all = 1` 플래그 하나만 기록됩니다.
 이때 "어떤 컬럼을 어떤 순서로"는 실행기가 스키마를 보고 결정합니다.
 
-관련 코드는 [parser.c](/Users/donghyunkim/Downloads/test_sql/week6-team5-sql/src/parser.c), 구조체 정의는 [sqlproc.h](/Users/donghyunkim/Downloads/test_sql/week6-team5-sql/include/sqlproc.h)에 있습니다.
+관련 코드는 [parser.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/parser.c), 구조체 정의는 [sqlproc.h](/Users/donghyunkim/Documents/week7-02-sql-index/include/sqlproc.h)에 있습니다.
 
 ## 3. 실행기가 하는 일
 
@@ -117,7 +117,7 @@ flowchart LR
 
 결과적으로 스토리지에는 인덱스 배열 `[2, 1]`과 개수 `2`가 전달됩니다.
 
-이 역할을 하는 핵심 함수는 [executor.c](/Users/donghyunkim/Downloads/test_sql/week6-team5-sql/src/executor.c)의 `resolve_selected_columns`입니다.
+이 역할을 하는 핵심 함수는 [executor.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/executor.c)의 `resolve_selected_columns`입니다.
 
 ## 4. 스토리지가 하는 일
 
@@ -157,7 +157,7 @@ sequenceDiagram
 - 어떤 컬럼을 어떤 순서로 출력할지는 실행기의 책임입니다.
 - 스토리지는 "주어진 인덱스 순서로 값을 골라 출력"하는 책임에만 집중합니다.
 
-관련 코드는 [storage.c](/Users/donghyunkim/Downloads/test_sql/week6-team5-sql/src/storage.c)의 `storage_print_rows`입니다.
+관련 코드는 [storage.c](/Users/donghyunkim/Documents/week7-02-sql-index/src/storage.c)의 `storage_print_rows`입니다.
 
 ## 5. 초심자가 헷갈리기 쉬운 포인트
 

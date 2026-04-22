@@ -1,4 +1,4 @@
-# `week6-team5-sql`
+# `week7-02-sql-index`
 
 > `WHERE id = ?` 조회가 왜 빠른지 B+ Tree 인덱스로 보여주는 교육용 SQL 처리기
 
@@ -16,6 +16,20 @@
 | 인덱스 값 | `id -> CSV row offset` |
 | 저장 방식 | `CSV` |
 | 스키마 | `<table>.schema` |
+
+## 관련 문서
+
+| 문서 | 용도 |
+| --- | --- |
+| [GUIDE.md](./GUIDE.md) | C 초심자용 코드베이스 입문 가이드 |
+| [AGENTS.md](./AGENTS.md) | 에이전트 작업 규칙과 현재 프로젝트 컨텍스트 |
+| [AGENTS_7.md](./AGENTS_7.md) | 7주차 B+ Tree 과제 구현 브리프 |
+| [PLAN_7.md](./PLAN_7.md) | 구현 순서 기록과 남은 개선 후보 |
+| [REVIEW.md](./REVIEW.md) | 과거 리뷰에서 발견한 리스크와 참고사항 |
+| [docs/bptree-easy-guide.md](./docs/bptree-easy-guide.md) | B+ Tree 인덱스 설명 |
+| [docs/storage-executor.md](./docs/storage-executor.md) | executor/storage/B+ Tree 연결 흐름 |
+| [docs/insert-column-order-explained.md](./docs/insert-column-order-explained.md) | INSERT 컬럼 순서 처리 설명 |
+| [docs/select-column-order-explained.md](./docs/select-column-order-explained.md) | SELECT 컬럼 순서 처리 설명 |
 
 ## 시스템 구조
 
@@ -415,8 +429,9 @@ flowchart LR
 ### 5. executor와 storage를 분리해 역할을 명확히 구분
 
 - 스키마에 `id:int` 컬럼이 있으면 `schema.c`가 PK 위치를 기억합니다.
-- `INSERT`에서 `id`를 생략하면 `executor.c`가 기존 CSV의 최대 `id`를 읽어 다음 값을 채웁니다.
-- 저장 직전에는 같은 `id`가 이미 있는지 확인해 중복 PK를 막습니다.
+- 테이블 최초 접근 시 `storage.c`가 CSV를 읽고, `executor.c`가 `next_id`와 B+ Tree 인덱스를 준비합니다.
+- `INSERT`에서 `id`를 생략하면 `executor.c`가 런타임 상태의 다음 PK 값을 채웁니다.
+- 저장 직전에는 B+ Tree에서 같은 `id`가 이미 있는지 확인해 중복 PK를 막습니다.
 
 ```mermaid
 flowchart LR
@@ -424,19 +439,26 @@ flowchart LR
         E1["타입·이름 검증"]
         E2["컬럼 순서 재배치"]
         E3["PK 자동 발급·중복 검사"]
+        E4["인덱스/스캔 분기"]
     end
     subgraph storage["storage.c — 파일 입출력"]
         S1["CSV 헤더 생성·검증"]
         S2["행 읽기·쓰기"]
-        S3["최대 PK / 중복 PK 확인"]
+        S3["row offset 기반 출력"]
+    end
+    subgraph index["bptree.c — 메모리 인덱스"]
+        B1["id -> row offset"]
     end
     executor -->|"storage 인터페이스 호출"| storage
+    executor -->|"bptree_*()"| index
 ```
 
 - `storage_append_row()` — INSERT 시 CSV에 한 행 추가
 - `storage_print_rows()` — SELECT 시 해당 컬럼만 출력
-- `storage_find_max_int_value()` — 자동 PK 발급용 최대값 계산
-- `storage_int_value_exists()` — PK 중복 여부 확인
+- `storage_print_row_at_offset()` — B+ Tree가 찾은 offset의 row 출력
+- `storage_print_rows_where_equals()` — 비-PK 조건 또는 `!=` 조건 선형 탐색
+- `storage_rebuild_pk_index()` — CSV를 읽어 메모리 B+ Tree 복구
+- `bptree_insert()` / `bptree_search()` — `id -> row offset` 등록과 조회
 - storage.c를 교체해도 executor.c를 건드릴 필요가 없음
 
 ## 협업과 회고
